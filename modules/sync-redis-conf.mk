@@ -64,11 +64,11 @@ sync-redis-conf:
 			fi; \
 			[ "$$first" = "1" ] || echo; \
 			first=0; \
-			if [ -f "modules/$$name/src/.prepared" ]; then \
+			if [ -f "$$so" ]; then \
 				echo "loadmodule $$so"; \
 				echo "include modules/$$name/src/module.conf"; \
 			else \
-				echo "# $$name not cloned (run 'make modules-update $$name' to enable)"; \
+				echo "# $$name .so not built at $$so (run 'make build $$name' to enable)"; \
 				echo "# loadmodule $$so"; \
 				echo "# include modules/$$name/src/module.conf"; \
 			fi; \
@@ -85,13 +85,14 @@ sync-redis-conf:
 		!skip { print } \
 	' "$(REDIS_CONF)" > "$(REDIS_CONF).tmp"; \
 	mv "$(REDIS_CONF).tmp" "$(REDIS_CONF)"; \
-	cloned=""; not_cloned=""; \
+	built=""; not_built=""; \
 	for name in $(AVAILABLE_MODULES); do \
-		if [ -f "modules/$$name/src/.prepared" ]; then cloned="$$cloned $$name"; \
-		else not_cloned="$$not_cloned $$name"; fi; \
+		so=$$(awk -v want="$$name" -v field=loadmodule '$(MANIFEST_FIELD_AWK)' $(MODULES_MANIFEST_FILE)); \
+		if [ -n "$$so" ] && [ -f "$$so" ]; then built="$$built $$name"; \
+		else not_built="$$not_built $$name"; fi; \
 	done; \
-	cloned=$$(echo $$cloned); not_cloned=$$(echo $$not_cloned); \
-	echo "    enabled in $(REDIS_CONF): $${cloned:-<none>}"; \
-	echo "    commented out:           $${not_cloned:-<none>}"
+	built=$$(echo $$built); not_built=$$(echo $$not_built); \
+	echo "    enabled in $(REDIS_CONF): $${built:-<none>}"; \
+	echo "    commented out:           $${not_built:-<none>}"
 
 .PHONY: sync-redis-conf

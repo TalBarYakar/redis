@@ -195,7 +195,10 @@ build:
 				printf "      %-20s (no .so found)\n" "$$name:"; \
 			fi; \
 		done; \
-	fi
+	fi; \
+	echo; \
+	echo "==> Syncing redis.conf auto-managed modules block (based on .so presence)"; \
+	$(MAKE) --no-print-directory sync-redis-conf
 
 # ----------------------------------------------------------------------------
 # `make setup [<name> ...|all|.|'*']`
