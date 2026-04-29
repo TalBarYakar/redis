@@ -116,7 +116,7 @@ build:
 	requested="$(BUILD_ARGS)"; \
 	cloned=""; \
 	for name in $(AVAILABLE_MODULES); do \
-		[ -d "modules/$$name/src/.git" ] || continue; \
+		[ -f "modules/$$name/src/.prepared" ] || continue; \
 		cloned="$$cloned $$name"; \
 	done; \
 	cloned=$$(echo $$cloned); \
@@ -216,7 +216,7 @@ setup:
 	@requested="$(SETUP_ARGS)"; \
 	cloned=""; \
 	for name in $(AVAILABLE_MODULES); do \
-		[ -d "modules/$$name/src/.git" ] || continue; \
+		[ -f "modules/$$name/src/.prepared" ] || continue; \
 		cloned="$$cloned $$name"; \
 	done; \
 	cloned=$$(echo $$cloned); \
@@ -309,7 +309,7 @@ run:
 	requested="$(RUN_ARGS)"; \
 	cloned=""; \
 	for name in $(AVAILABLE_MODULES); do \
-		[ -d "modules/$$name/src/.git" ] || continue; \
+		[ -f "modules/$$name/src/.prepared" ] || continue; \
 		cloned="$$cloned $$name"; \
 	done; \
 	cloned=$$(echo $$cloned); \
@@ -395,7 +395,7 @@ test:
 	target="$$1"; shift; \
 	cloned=""; \
 	for name in $(AVAILABLE_MODULES); do \
-		[ -d "modules/$$name/src/.git" ] || continue; \
+		[ -f "modules/$$name/src/.prepared" ] || continue; \
 		cloned="$$cloned $$name"; \
 	done; \
 	cloned=$$(echo $$cloned); \
@@ -726,6 +726,10 @@ release-tarball:
 	for name in $(AVAILABLE_MODULES); do \
 		touch "$$work/modules/$$name/src/.prepared"; \
 	done; \
+	if [ -d "$$work/modules/redisearch/src" ]; then \
+		echo "==> Re-creating empty .git marker for redisearch (its build.rs walks up to find one)"; \
+		mkdir -p "$$work/modules/redisearch/src/.git"; \
+	fi; \
 	echo; \
 	echo "==> Producing reproducible tarball at $$out"; \
 	mtime=$$(git log -1 --format=%ct "$$tag"); \
