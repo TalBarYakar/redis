@@ -69,85 +69,12 @@ manifest-field = $(shell awk -v want="$2" -v field="$1" '$(MANIFEST_FIELD_AWK)' 
 # already handle that case.
 AVAILABLE_MODULES := $(sort $(shell awk '$(MANIFEST_NAMES_AWK)' $(MODULES_MANIFEST_FILE) 2>/dev/null))
 
-# ----------------------------------------------------------------------------
-# `make sync-redis-conf` — rewrite the auto-managed modules block in redis.conf
+# Note: this file intentionally defines NO targets.
 #
-# For every module listed in modules.yaml, emits either:
-#   - active `loadmodule <so>` + `include modules/<name>/src/module.conf`
-#     pair if `modules/<name>/src/.prepared` exists, or
-#   - commented-out placeholders otherwise.
-#
-# Block boundaries are the markers
-#   "# >>> BEGIN auto-managed modules section <<<"
-#   "# <<< END auto-managed modules section <<<"
-# in redis.conf. Anything outside the markers is preserved as-is.
-#
-# Usually invoked automatically by `make modules-update`; can also be run
-# standalone after manually adding/removing `modules/<name>/src/.prepared`.
-#
-# REDIS_CONF defaults to `redis.conf` (relative to the current working
-# directory, matching the convention used by every other path in our
-# Makefile — invoke from the repo root).
-# ----------------------------------------------------------------------------
-REDIS_CONF ?= redis.conf
-
-sync-redis-conf:
-	@if [ ! -f "$(REDIS_CONF)" ]; then \
-		echo "ERROR: $(REDIS_CONF) not found"; exit 1; \
-	fi; \
-	if ! grep -q '^# >>> BEGIN auto-managed modules section <<<$$' "$(REDIS_CONF)"; then \
-		echo "ERROR: BEGIN marker not found in $(REDIS_CONF)"; \
-		echo "       Expected line: '# >>> BEGIN auto-managed modules section <<<'"; \
-		exit 1; \
-	fi; \
-	if ! grep -q '^# <<< END auto-managed modules section <<<$$' "$(REDIS_CONF)"; then \
-		echo "ERROR: END marker not found in $(REDIS_CONF)"; \
-		echo "       Expected line: '# <<< END auto-managed modules section <<<'"; \
-		exit 1; \
-	fi; \
-	block=$$(mktemp -t redis-conf-block.XXXXXX); \
-	trap 'rm -f "$$block" "$(REDIS_CONF).tmp"' EXIT; \
-	{ \
-		echo "# (Anything between this and the matching END marker is rewritten by"; \
-		echo "#  \`make modules-update\`. Edits inside this block will be lost.)"; \
-		echo; \
-		first=1; \
-		for name in $(AVAILABLE_MODULES); do \
-			so=$$(awk -v want="$$name" -v field=loadmodule '$(MANIFEST_FIELD_AWK)' $(MODULES_MANIFEST_FILE)); \
-			if [ -z "$$so" ]; then \
-				echo "WARNING: 'loadmodule' field missing for '$$name' in modules.yaml" >&2; \
-				continue; \
-			fi; \
-			[ "$$first" = "1" ] || echo; \
-			first=0; \
-			if [ -f "modules/$$name/src/.prepared" ]; then \
-				echo "loadmodule $$so"; \
-				echo "include modules/$$name/src/module.conf"; \
-			else \
-				echo "# $$name not cloned (run 'make modules-update $$name' to enable)"; \
-				echo "# loadmodule $$so"; \
-				echo "# include modules/$$name/src/module.conf"; \
-			fi; \
-		done; \
-		echo; \
-	} > "$$block"; \
-	awk -v block="$$block" '\
-		/^# >>> BEGIN auto-managed modules section <<<$$/ { \
-			print; \
-			while ((getline line < block) > 0) print line; \
-			skip=1; next; \
-		} \
-		/^# <<< END auto-managed modules section <<<$$/ { skip=0 } \
-		!skip { print } \
-	' "$(REDIS_CONF)" > "$(REDIS_CONF).tmp"; \
-	mv "$(REDIS_CONF).tmp" "$(REDIS_CONF)"; \
-	cloned=""; not_cloned=""; \
-	for name in $(AVAILABLE_MODULES); do \
-		if [ -f "modules/$$name/src/.prepared" ]; then cloned="$$cloned $$name"; \
-		else not_cloned="$$not_cloned $$name"; fi; \
-	done; \
-	cloned=$$(echo $$cloned); not_cloned=$$(echo $$not_cloned); \
-	echo "    enabled in $(REDIS_CONF): $${cloned:-<none>}"; \
-	echo "    commented out:           $${not_cloned:-<none>}"
-
-.PHONY: sync-redis-conf
+# Both the top-level Makefile and modules/common.mk (via every per-module
+# Makefile) include manifest.mk to read the manifest. If we declared a
+# target here, it would become the default goal of any per-module
+# `make -C modules/<name>` invocation (since GNU Make uses the first
+# non-pattern target it sees). The companion file `sync-redis-conf.mk`
+# carries the `sync-redis-conf` recipe and is included only by the
+# top-level Makefile.

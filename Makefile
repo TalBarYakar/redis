@@ -29,7 +29,13 @@ default: all
 # Manifest parsing (modules.yaml → AVAILABLE_MODULES + helpers). Both the
 # top-level Makefile and modules/common.mk include this so a per-module
 # build (`make -C modules/<name>`) sees the same data.
+#
+# The companion `modules/sync-redis-conf.mk` carries the repo-root-only
+# `sync-redis-conf` recipe and is included from this Makefile *only*, so
+# per-module builds never see that target (which would otherwise hijack
+# their default goal — see modules/sync-redis-conf.mk for details).
 include modules/manifest.mk
+include modules/sync-redis-conf.mk
 
 MODULES_GOALS := modules modules-update
 ifneq ($(filter $(MODULES_GOALS),$(firstword $(MAKECMDGOALS))),)
@@ -558,10 +564,11 @@ modules modules-update:
 	fi
 
 # ----------------------------------------------------------------------------
-# `make sync-redis-conf` — recipe lives in modules/manifest.mk (which this
-# Makefile already includes), since it's manifest-driven. Listed in this
-# Makefile's .PHONY further down so `gmake sync-redis-conf` works from the
-# repo root and so `modules-update` can invoke it via $(MAKE).
+# `make sync-redis-conf` — recipe lives in modules/sync-redis-conf.mk
+# (included near the top of this Makefile). Kept out of modules/manifest.mk
+# so it isn't visible from per-module builds. Listed in this Makefile's
+# .PHONY further down so `gmake sync-redis-conf` works from the repo root
+# and so `modules-update` can invoke it via $(MAKE).
 # ----------------------------------------------------------------------------
 
 # ----------------------------------------------------------------------------
