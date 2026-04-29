@@ -19,6 +19,11 @@
 #       repo: <git URL>
 #       version: <tag-or-branch>       # required if `commit` is empty
 #       commit: <sha-or-empty>         # optional; wins over `version`
+#       loadmodule: <path-to-.so>      # used by `make modules-update` to
+#                                      # rewrite the auto-managed block in
+#                                      # redis.conf; the .so basename does not
+#                                      # always match the module name (e.g.
+#                                      # redisjson produces rejson.so).
 #
 # Notes:
 #   - `vector-sets` is intentionally absent — it lives in-tree under
@@ -29,16 +34,20 @@ modules:
   - name: redisbloom
     repo: https://github.com/redisbloom/redisbloom
     version: tal.ba/feat/make_set_up
-    commit: 
+    commit:
+    loadmodule: ./modules/redisbloom/redisbloom.so
   - name: redisearch
     repo: https://github.com/redisearch/redisearch
     version: v8.7.90
     commit:
+    loadmodule: ./modules/redisearch/redisearch.so
   - name: redisjson
     repo: https://github.com/redisjson/redisjson
     version: tal.ba/feat/make_set_up
     commit:
+    loadmodule: ./modules/redisjson/rejson.so
   - name: redistimeseries
     repo: https://github.com/redistimeseries/redistimeseries
     version: tal.ba/feat/make_setup
     commit:
+    loadmodule: ./modules/redistimeseries/redistimeseries.so

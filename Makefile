@@ -546,6 +546,9 @@ modules modules-update:
 		touch "$$dest/.prepared"; \
 	done; \
 	echo; \
+	echo "==> Syncing redis.conf auto-managed modules block"; \
+	$(MAKE) --no-print-directory sync-redis-conf; \
+	echo; \
 	echo "==> Cloning/updating done. Now running 'make setup' for: $$requested"; \
 	echo "    (skip with MODULES_UPDATE_SKIP_SETUP=1)"; \
 	if [ "$(MODULES_UPDATE_SKIP_SETUP)" != "1" ]; then \
@@ -553,6 +556,13 @@ modules modules-update:
 	else \
 		echo "==> setup skipped (MODULES_UPDATE_SKIP_SETUP=1)"; \
 	fi
+
+# ----------------------------------------------------------------------------
+# `make sync-redis-conf` — recipe lives in modules/manifest.mk (which this
+# Makefile already includes), since it's manifest-driven. Listed in this
+# Makefile's .PHONY further down so `gmake sync-redis-conf` works from the
+# repo root and so `modules-update` can invoke it via $(MAKE).
+# ----------------------------------------------------------------------------
 
 # ----------------------------------------------------------------------------
 # `make modules-unshallow <name> [<name> ...]`
@@ -749,4 +759,4 @@ release-tarball:
 	echo "    size:    $$size"; \
 	echo "    sha256:  $$sha"
 
-.PHONY: install build run test setup modules modules-update modules-unshallow release-tarball
+.PHONY: install build run test setup modules modules-update modules-unshallow sync-redis-conf release-tarball

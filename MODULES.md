@@ -95,6 +95,41 @@ Makefile). After every successful run, `modules/<name>/src/.prepared` is
 touched so `common.mk`'s prepare step is satisfied and won't try to
 re-clone on subsequent builds.
 
+### Side effect: `redis.conf` is kept in sync
+
+After cloning, `make modules-update` invokes `make sync-redis-conf` which
+rewrites the auto-managed block in `redis.conf` based on which modules
+have a `.prepared` sentinel:
+
+- modules with `modules/<name>/src/.prepared` → active
+  `loadmodule <so>` + `include modules/<name>/src/module.conf` pair
+- modules without a sentinel → commented-out placeholder lines
+
+This means `./src/redis-server redis.conf` works no matter which subset
+of modules you've cloned — the not-yet-cloned ones don't fatal out.
+
+The block is delimited by these exact lines (do not edit):
+
+```conf
+# >>> BEGIN auto-managed modules section <<<
+...
+# <<< END auto-managed modules section <<<
+```
+
+Anything outside the markers is preserved verbatim across syncs.
+
+The `.so` path per module comes from the `loadmodule:` field in
+`modules.yaml` (the basename does not always match the module name —
+e.g. `redisjson` produces `rejson.so`).
+
+You can also run the sync standalone (e.g. after manually
+adding/removing a `.prepared` file or editing the `loadmodule:` field):
+
+```bash
+make sync-redis-conf
+make sync-redis-conf REDIS_CONF=path/to/other.conf   # uncommon override
+```
+
 ### Fetching full history: `make modules-unshallow`
 
 `make modules-update` clones with `--depth 1` for speed/disk, which
@@ -409,6 +444,7 @@ make release-tarball TAG=HEAD AVAILABLE_MODULES=redisearch
 ```
 make modules-update <name> [<name> ...]      # idempotent: clones if missing, else updates to pin
 make modules <name> [<name> ...]             # alias of modules-update
+make sync-redis-conf                         # rewrite redis.conf modules block from `.prepared` state
 make modules-unshallow <name> [<name> ...]   # convert shallow clone(s) to full history
 
 make build [<name> ...|all|.|'*'|redis|none] [VAR=value ...]
