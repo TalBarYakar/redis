@@ -176,7 +176,11 @@ build:
 	if [ -n "$$modules" ]; then \
 		echo "    Module artifacts:"; \
 		for name in $$modules; do \
-			sos=$$(find "modules/$$name" -type f -name '*.so' 2>/dev/null); \
+			sos=$$(find "modules/$$name" -type f -name '*.so' \
+				-not -path '*/venv/*' \
+				-not -path '*/.cargo/*' \
+				-not -path '*/site-packages/*' \
+				-not -path '*/deps/*' 2>/dev/null); \
 			if [ -n "$$sos" ]; then \
 				printf "      %-20s " "$$name:"; echo "$$sos" | head -1; \
 				echo "$$sos" | tail -n +2 | sed 's|^|                           |'; \
@@ -239,10 +243,28 @@ setup:
 		exit 1; \
 	fi; \
 	echo "==> Setting up: $$selected"; \
+	export PIP_BREAK_SYSTEM_PACKAGES=1; \
 	failed=""; \
 	for name in $$selected; do \
 		echo; \
 		echo "==> [setup] $$name"; \
+		src_mk="modules/$$name/src/Makefile"; \
+		if [ ! -f "$$src_mk" ]; then \
+			echo "    !! SKIP: $$src_mk does not exist"; \
+			echo "       (the upstream clone may be incomplete; try 'make modules-update $$name')"; \
+			failed="$$failed $$name"; \
+			continue; \
+		fi; \
+		if ! grep -qE '^setup[[:space:]]*:' "$$src_mk"; then \
+			echo "    !! SKIP: no 'setup' target in $$src_mk"; \
+			echo "       Add one to the upstream Makefile, e.g.:"; \
+			echo "           setup:"; \
+			echo "                   ./sbin/setup"; \
+			echo "           .PHONY: setup"; \
+			echo "       then commit & push to the module's repo."; \
+			failed="$$failed $$name"; \
+			continue; \
+		fi; \
 		if ! $(MAKE) -C "modules/$$name/src" setup; then \
 			failed="$$failed $$name"; \
 		fi; \
@@ -510,7 +532,15 @@ modules modules-update:
 			git -C "$$dest" submodule update --init --recursive --depth 1; \
 		fi; \
 		touch "$$dest/.prepared"; \
-	done
+	done; \
+	echo; \
+	echo "==> Cloning/updating done. Now running 'make setup' for: $$requested"; \
+	echo "    (skip with MODULES_UPDATE_SKIP_SETUP=1)"; \
+	if [ "$(MODULES_UPDATE_SKIP_SETUP)" != "1" ]; then \
+		$(MAKE) --no-print-directory setup $$requested; \
+	else \
+		echo "==> setup skipped (MODULES_UPDATE_SKIP_SETUP=1)"; \
+	fi
 
 # ----------------------------------------------------------------------------
 # `make modules-unshallow <name> [<name> ...]`
