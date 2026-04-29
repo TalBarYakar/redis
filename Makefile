@@ -58,6 +58,12 @@ ifeq ($(firstword $(MAKECMDGOALS)),build)
   $(foreach m,$(BUILD_ARGS),$(eval .PHONY: $(m))$(eval $(m): ; @:))
 endif
 
+# `make setup [<name> ...]` — install build/test prereqs for selected module(s).
+ifeq ($(firstword $(MAKECMDGOALS)),setup)
+  SETUP_ARGS := $(filter-out setup,$(MAKECMDGOALS))
+  $(foreach m,$(SETUP_ARGS),$(eval .PHONY: $(m))$(eval $(m): ; @:))
+endif
+
 # `make test [all|<module> [<test_name>]]` capture — same trick.
 # Note: Make cannot have explicit target names containing ':', so test names
 # using the `file:test` convention (redisjson, RLTest filters, some
@@ -179,6 +185,76 @@ build:
 			fi; \
 		done; \
 	fi
+
+# ----------------------------------------------------------------------------
+# `make setup [<name> ...|all|.|'*']`
+#
+# One-time install of build & test prereqs for the selected cloned
+# module(s). The per-module setup logic lives in each upstream's own
+# Makefile (`modules/<name>/src/Makefile`), so it's standalone-runnable
+# as `cd modules/<name>/src && gmake setup` and can be committed back
+# upstream. This target just dispatches via sub-make.
+#
+# Requires every cloned module to expose a `setup` target in its src
+# Makefile (true for redisjson out of the box; added to redisbloom and
+# redistimeseries in our forks; pending for redisearch).
+#
+# Module selection (matches build/run/test):
+#   (no args) | all | . | '*'   every cloned module under modules/<name>/src
+#   <name> [<name> ...]         the listed modules
+#
+# Continues past per-module failures, prints a summary, exits non-zero if
+# any failed. Idempotent but slow; may prompt for sudo (apt/brew/dnf).
+# NOT triggered automatically by `build` — invoke once on a fresh checkout.
+# ----------------------------------------------------------------------------
+setup:
+	@requested="$(SETUP_ARGS)"; \
+	cloned=""; \
+	for name in $(AVAILABLE_MODULES); do \
+		[ -d "modules/$$name/src/.git" ] || continue; \
+		cloned="$$cloned $$name"; \
+	done; \
+	cloned=$$(echo $$cloned); \
+	case "$$requested" in \
+		""|all|.|'*') selected="$$cloned" ;; \
+		*) \
+			for r in $$requested; do \
+				case "$$r" in all|.|'*') \
+					echo "ERROR: '$$r' cannot be mixed with explicit module names"; exit 1 ;; \
+				esac; \
+				found=""; \
+				for c in $$cloned; do [ "$$c" = "$$r" ] && found=1; done; \
+				if [ -z "$$found" ]; then \
+					echo "ERROR: module '$$r' is not cloned under modules/$$r/src"; \
+					echo "Cloned modules: $$cloned"; \
+					echo "Hint: run 'make modules-update $$r' first"; \
+					exit 1; \
+				fi; \
+			done; \
+			selected="$$requested" ;; \
+	esac; \
+	if [ -z "$$selected" ]; then \
+		echo "ERROR: no cloned modules to set up"; \
+		echo "       run 'make modules-update all' first"; \
+		exit 1; \
+	fi; \
+	echo "==> Setting up: $$selected"; \
+	failed=""; \
+	for name in $$selected; do \
+		echo; \
+		echo "==> [setup] $$name"; \
+		if ! $(MAKE) -C "modules/$$name/src" setup; then \
+			failed="$$failed $$name"; \
+		fi; \
+	done; \
+	echo; \
+	if [ -n "$$failed" ]; then \
+		echo "==> Setup completed with FAILURES for:$$failed"; \
+		echo "    Re-run 'make setup$$failed' after fixing the issues above."; \
+		exit 1; \
+	fi; \
+	echo "==> Setup complete for: $$selected"; \
+	echo "    Next: 'make build [<name>]' then 'make test [<name>]' or 'make run'."
 
 # ----------------------------------------------------------------------------
 # `make run [<name> ...] [ARGS="<redis-server args>"]`
@@ -517,4 +593,4 @@ modules-unshallow:
 		touch "$$dest/.prepared"; \
 	done
 
-.PHONY: install build run test modules modules-update modules-unshallow
+.PHONY: install build run test setup modules modules-update modules-unshallow
