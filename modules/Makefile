@@ -86,7 +86,8 @@ ifeq ($(DISABLE_WERRORS),yes)
 			\( -name "Makefile" \
 			-o -name "*.mk" \
 			-o -name "CMakeLists.txt" \) \
-			-exec sed -i 's/-Werror//g' {} +; \
+			-exec sed -i.werrors_bak 's/-Werror//g' {} +; \
+		find $$dir/src -type f -name '*.werrors_bak' -delete; \
 	done
 endif
 

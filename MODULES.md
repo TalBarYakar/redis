@@ -329,7 +329,82 @@ make test all                                 # every module
 
 ---
 
-## 8. Full command reference
+## 8. Release tarball: `make release-tarball`
+
+Build a self-contained, reproducible source release tarball of Redis +
+every module pinned in `modules.yaml`. The output is "ready to build" —
+no `make modules-update` step required by the consumer.
+
+```bash
+make release-tarball TAG=<tag> \
+                     [STAGING_DIR=<dir>] \
+                     [OUT_PATH=<path>] \
+                     [TAR=<gnu-tar>]
+```
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `TAG` | *(required)* | Git ref of Redis core to archive (e.g. `8.0.0`) |
+| `STAGING_DIR` | `/tmp/redis-tarball-staging-<tag>` | Workdir, wiped on entry and on success |
+| `OUT_PATH` | `/tmp/redis-<tag>.tar.gz` | Final tarball location |
+| `TAR` | `gtar` if found, else `tar` | Must be GNU tar (macOS BSD tar lacks `--sort`/`--mtime`) |
+
+### What it does
+
+1. Validates `TAG` resolves to a commit and that `TAR` is GNU tar.
+2. `git archive <tag>` of Redis core into `<staging>/redis-<tag>/`.
+3. For each module in `modules.yaml`, clones the upstream repo at the
+   pinned ref (commit wins over version) into
+   `<staging>/redis-<tag>/modules/<name>/src/`, recursively initializing
+   submodules.
+4. Strips `.git/`, `.github/`, and `.gitmodules` from cloned modules
+   (Redis core's own `.github/` is preserved — it came from `git
+   archive` and isn't dev-clone metadata).
+5. Produces a deterministic tarball: entries sorted by name, mtimes
+   pinned to the tag's commit timestamp, owner/group `0`, gzip with
+   `-n` (no embedded mtime). Two runs from the same `TAG` yield
+   byte-identical output.
+6. Prints final size and sha256.
+
+### Tarball layout
+
+```
+redis-<tag>/
+├── (full Redis core source: src/, deps/, redis.conf, redis-full.conf,
+│   modules.yaml, Makefile, MODULES.md, modules/{Makefile,common.mk,
+│   manifest.mk}, modules/<name>/Makefile, modules/vector-sets/, ...)
+└── modules/
+    ├── redisbloom/src/      (cloned, no .git)
+    ├── redisearch/src/      (cloned + recursive submodules, no .git)
+    ├── redisjson/src/       (cloned, no .git)
+    └── redistimeseries/src/ (cloned, no .git)
+```
+
+### Consumer flow
+
+```bash
+tar xzf redis-<tag>.tar.gz
+cd redis-<tag>
+gmake BUILD_WITH_MODULES=yes INSTALL_RUST_TOOLCHAIN=yes DISABLE_WERRORS=yes
+./src/redis-server redis-full.conf
+```
+
+No network access needed at build time — modules are already on disk.
+
+### Scoping for development / testing
+
+Pass `AVAILABLE_MODULES="<name> [<name> ...]"` on the command line to
+build a tarball with only a subset of modules cloned (everything else
+in the manifest is skipped). Useful for smoke-testing the release
+machinery without paying the clone cost for every module:
+
+```bash
+make release-tarball TAG=HEAD AVAILABLE_MODULES=redisearch
+```
+
+---
+
+## 9. Full command reference
 
 ```
 make modules-update <name> [<name> ...]      # idempotent: clones if missing, else updates to pin
@@ -346,6 +421,8 @@ make test all | . | '*'
 make test <module>
 make test <module> <test_name>
 make test <module> TEST=<name>                # required for names containing ':'
+
+make release-tarball TAG=<tag> [STAGING_DIR=<dir>] [OUT_PATH=<path>] [TAR=<gnu-tar>]
 ```
 
 All targets are declared `.PHONY` and can be freely combined with make's

@@ -635,4 +635,114 @@ modules-unshallow:
 		touch "$$dest/.prepared"; \
 	done
 
-.PHONY: install build run test setup modules modules-update modules-unshallow
+# ----------------------------------------------------------------------------
+# `make release-tarball TAG=<tag> [STAGING_DIR=<dir>] [OUT_PATH=<path>] [TAR=<gnu-tar>]`
+#
+# Build a self-contained, reproducible source release tarball:
+#
+#   redis-<tag>/
+#     <Redis core source tree from `git archive <tag>`>
+#     modules/<name>/src/    <-- cloned per modules.yaml at pinned ref,
+#                                with .git/ and .github/ stripped
+#
+# After `tar xzf redis-<tag>.tar.gz && cd redis-<tag>`, the user can run
+#   gmake BUILD_WITH_MODULES=yes INSTALL_RUST_TOOLCHAIN=yes DISABLE_WERRORS=yes
+#   ./src/redis-server redis-full.conf
+# and have a working Redis + every bundled module loaded — without any git
+# fetches or `make modules-update` invocations.
+#
+# Inputs:
+#   TAG         (required)   git ref of Redis core to archive (e.g. 8.0.0)
+#   STAGING_DIR (default:    /tmp/redis-tarball-staging-<tag>) — wiped on entry
+#   OUT_PATH    (default:    /tmp/redis-<tag>.tar.gz)
+#   TAR         (default:    gtar if found, else tar) — must be GNU tar so
+#                            we can use --sort/--mtime/--owner/--group for
+#                            byte-reproducible output across runs.
+#
+# Reproducibility: tar entries are sorted by name, mtimes set to the tag's
+# commit timestamp, owner/group fixed to 0. Two runs from the same TAG
+# produce byte-identical tarballs (assuming upstream module SHAs are
+# unchanged).
+# ----------------------------------------------------------------------------
+TAR ?= $(shell command -v gtar 2>/dev/null || command -v tar 2>/dev/null)
+
+release-tarball:
+	@if [ -z "$(TAG)" ]; then \
+		echo "ERROR: TAG=<tag> is required"; \
+		echo "       e.g. 'make release-tarball TAG=8.0.0'"; \
+		exit 1; \
+	fi
+	@if ! git rev-parse --verify -q "$(TAG)^{commit}" >/dev/null 2>&1; then \
+		echo "ERROR: '$(TAG)' is not a valid git ref in this repo"; \
+		exit 1; \
+	fi
+	@if [ -z "$(TAR)" ]; then \
+		echo "ERROR: no tar binary found on PATH"; exit 1; \
+	fi
+	@if ! "$(TAR)" --version 2>&1 | grep -qi 'GNU tar'; then \
+		echo "ERROR: GNU tar required (found: $$($(TAR) --version 2>&1 | head -1))"; \
+		echo "       On macOS: brew install gnu-tar, then retry with TAR=gtar"; \
+		exit 1; \
+	fi
+	@set -e; \
+	tag="$(TAG)"; \
+	staging="$(or $(STAGING_DIR),/tmp/redis-tarball-staging-$$tag)"; \
+	out="$(or $(OUT_PATH),/tmp/redis-$$tag.tar.gz)"; \
+	prefix="redis-$$tag"; \
+	work="$$staging/$$prefix"; \
+	echo "==> Staging at $$staging"; \
+	rm -rf "$$staging"; \
+	mkdir -p "$$work"; \
+	echo "==> git archive Redis core @ $$tag → $$work"; \
+	git archive --format=tar "$$tag" | "$(TAR)" -x -C "$$work"; \
+	echo; \
+	echo "==> Cloning bundled modules per modules.yaml"; \
+	for name in $(AVAILABLE_MODULES); do \
+		repo=$$(awk    -v want="$$name" -v field=repo    '$(MANIFEST_FIELD_AWK)' $(MODULES_MANIFEST_FILE)); \
+		version=$$(awk -v want="$$name" -v field=version '$(MANIFEST_FIELD_AWK)' $(MODULES_MANIFEST_FILE)); \
+		commit=$$(awk  -v want="$$name" -v field=commit  '$(MANIFEST_FIELD_AWK)' $(MODULES_MANIFEST_FILE)); \
+		dest="$$work/modules/$$name/src"; \
+		mkdir -p "$$work/modules/$$name"; \
+		if [ -n "$$commit" ]; then \
+			echo "  --> $$name @ commit $$commit ($$repo)"; \
+			git init -q "$$dest"; \
+			git -C "$$dest" remote add origin "$$repo"; \
+			if ! git -C "$$dest" fetch --depth 1 origin "$$commit" 2>/dev/null; then \
+				git -C "$$dest" fetch origin; \
+			fi; \
+			git -C "$$dest" checkout -q --detach "$$commit"; \
+			git -C "$$dest" submodule update --init --recursive --depth 1; \
+		else \
+			echo "  --> $$name @ $$version ($$repo)"; \
+			git clone --recursive --depth 1 --branch "$$version" "$$repo" "$$dest"; \
+		fi; \
+	done; \
+	echo; \
+	echo "==> Stripping .git and .github from cloned modules"; \
+	find "$$work/modules" -name '.git' -prune -exec rm -rf {} + 2>/dev/null || true; \
+	find "$$work/modules" -type d -name '.github' -prune -exec rm -rf {} + 2>/dev/null || true; \
+	find "$$work/modules" -name '.gitmodules' -delete 2>/dev/null || true; \
+	echo "==> Marking modules pre-prepared (so consumer 'make' skips clone step)"; \
+	for name in $(AVAILABLE_MODULES); do \
+		touch "$$work/modules/$$name/src/.prepared"; \
+	done; \
+	echo; \
+	echo "==> Producing reproducible tarball at $$out"; \
+	mtime=$$(git log -1 --format=%ct "$$tag"); \
+	rm -f "$$out"; \
+	(cd "$$staging" && "$(TAR)" \
+		--sort=name \
+		--mtime="@$$mtime" \
+		--owner=0 --group=0 --numeric-owner \
+		--use-compress-program='gzip -n' \
+		-cf "$$out" "$$prefix"); \
+	echo "==> Cleaning staging $$staging"; \
+	rm -rf "$$staging"; \
+	echo; \
+	echo "==> Tarball ready: $$out"; \
+	size=$$(du -h "$$out" | awk '{print $$1}'); \
+	sha=$$(shasum -a 256 "$$out" | awk '{print $$1}'); \
+	echo "    size:    $$size"; \
+	echo "    sha256:  $$sha"
+
+.PHONY: install build run test setup modules modules-update modules-unshallow release-tarball
