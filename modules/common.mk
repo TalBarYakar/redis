@@ -12,6 +12,13 @@ ARCH_MAP_aarch64 := arm64v8
 ARCH_MAP_arm64 := arm64v8
 
 OS := $(shell uname -s | tr '[:upper:]' '[:lower:]')
+# Upstream Redis modules (RedisLabs `readies`/CMake harness) emit build
+# artifacts under `bin/macos-<arch>-release/` on macOS, but `uname -s`
+# returns "Darwin". Map darwin -> macos so $(TARGET_MODULE) lines up with
+# the path the module actually produces.
+ifeq ($(OS),darwin)
+	OS := macos
+endif
 ARCH := $(ARCH_MAP_$(shell uname -m))
 ifeq ($(ARCH),)
 	$(error Unrecognized CPU architecture $(shell uname -m))
@@ -30,9 +37,13 @@ $(TARGET_MODULE): get_source
 get_source: $(SRC_DIR)/.prepared
 
 $(SRC_DIR)/.prepared:
-	mkdir -p $(SRC_DIR)
-	git clone --recursive --depth 1 --branch $(MODULE_VERSION) $(MODULE_REPO) $(SRC_DIR)
-	touch $@
+	@if [ -d "$(SRC_DIR)/.git" ]; then \
+		echo "==> $(SRC_DIR) already cloned, marking prepared (use 'make modules-update $(notdir $(CURDIR))' to refresh)"; \
+	else \
+		mkdir -p $(SRC_DIR); \
+		git clone --recursive --depth 1 --branch $(MODULE_VERSION) $(MODULE_REPO) $(SRC_DIR); \
+	fi
+	@touch $@
 
 clean:
 	-$(MAKE) -C $(SRC_DIR) clean

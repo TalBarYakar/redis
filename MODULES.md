@@ -1,9 +1,10 @@
 # External Modules: build, run, and test
 
 This document describes the Makefile additions that manage external Redis
-modules as source-pinned dependencies — cloned into `deps/modules/`, built
-against this repo's Redis, loaded into `redis-server` at runtime, and
-tested from one top-level entry point.
+modules as source-pinned dependencies — cloned into each module's own
+`modules/<name>/src/` directory, built against this repo's Redis, loaded
+into `redis-server` at runtime, and tested from one top-level entry
+point.
 
 All commands are invoked at the repo root. On macOS, you must use
 `gmake` (GNU Make ≥ 4.x) instead of `make`, because upstream module
@@ -18,7 +19,7 @@ Everywhere below, `make` means "GNU make"; substitute `gmake` on macOS.
 |---|---|
 | `modules/<name>/Makefile` | Pin file — declares `MODULE_REPO`, `MODULE_VERSION`, optional `MODULE_COMMIT`, `TARGET_MODULE` |
 | `modules/common.mk` | Shared helpers included by each pin file |
-| `deps/modules/<name>/` | Checkout location — created by `make modules clone` |
+| `modules/<name>/src/` | Checkout location — created by `make modules-update` |
 | `src/redis-server` | Redis binary — produced by `make build` |
 
 Only modules whose `modules/<name>/Makefile` pins `MODULE_REPO` are
@@ -43,19 +44,16 @@ Leave `MODULE_COMMIT` empty to track the tag/branch.
 
 ---
 
-## 2. Clone / update: `make modules`
+## 2. Clone / update: `make modules-update`
 
 ```bash
-make modules [clone|update] <name> [<name> ...]
-make modules-update <name> ...        # alias of `make modules update <name> ...`
+make modules-update <name> [<name> ...]
+make modules <name> [<name> ...]      # alias — same idempotent behavior
 ```
 
-Subcommands:
-
-| Subcommand | Effect |
-|---|---|
-| `clone` (default) | Shallow-clone the selected module(s) into `deps/modules/` at the pinned ref |
-| `update` | Move existing clone to the current pin and re-sync submodules |
+A single idempotent command: clones the module into `modules/<name>/src/`
+at the pinned ref if it isn't there yet, otherwise moves the existing
+clone to the current pin and re-syncs its submodules. Safe to re-run.
 
 Name expansion:
 
@@ -67,30 +65,59 @@ Name expansion:
 Examples:
 
 ```bash
-make modules clone redistimeseries
-make modules clone redisbloom redisearch redisjson
-make modules clone all
-
-make modules update redistimeseries
-make modules update all
+make modules-update redistimeseries
+make modules-update redisbloom redisearch redisjson
+make modules-update all
 ```
 
-Override location with `DEPS_MODULES_DIR=…` if needed
-(default `deps/modules`).
+The clone location is fixed at `modules/<name>/src/` (alongside the pin
+Makefile). After every successful run, `modules/<name>/src/.prepared` is
+touched so `common.mk`'s prepare step is satisfied and won't try to
+re-clone on subsequent builds.
+
+### Fetching full history: `make modules-unshallow`
+
+`make modules-update` clones with `--depth 1` for speed/disk, which
+leaves only the pinned tip commit visible to tools like Git Graph,
+GitLens, or `git log`. To pull in the full upstream history (and the
+submodules' full history) for already-cloned module(s):
+
+```bash
+make modules-unshallow redistimeseries
+make modules-unshallow redisbloom redisearch
+make modules-unshallow all
+```
+
+Idempotent: repos that already have full history are skipped. Note this
+can add significant disk/network for large modules (e.g. `redisearch`).
 
 ---
 
 ## 3. Build: `make build`
 
 ```bash
-make build
+make build [<name> ...|all|.|'*'|redis|none] [VAR=value ...]
 ```
+
+Selection:
+
+| Argument | Selects |
+|---|---|
+| *(none)* | Redis + every cloned module |
+| `all` / `.` / `'*'` | Same as *(none)* |
+| `redis` / `none` | Redis only; skip modules |
+| `<name> [<name> ...]` | Redis + only the listed modules |
+
+Invalid module names are detected **before** any compilation runs — you
+won't waste time on a Redis rebuild just to hit a typo at the end.
 
 Order (deliberate):
 
-1. Build Redis (`$(MAKE) -C src all`). If this fails, nothing else runs.
-2. For every cloned module under `deps/modules/*`, invoke
-   `$(MAKE) -C deps/modules/<name>` with:
+1. Validate selection.
+2. Build Redis (`$(MAKE) -C src all`). If this fails, nothing else runs.
+3. For each selected cloned module, invoke `$(MAKE) -C modules/<name>`
+   (the wrapper Makefile, which uses `common.mk` to descend into
+   `modules/<name>/src/`) with:
    ```make
    RM_INCLUDE_DIR=<repo>/src    # point at our redismodule.h
    RS_INCLUDE_DIR=<repo>/src    # redisearch SDK variant
@@ -99,13 +126,20 @@ Order (deliberate):
    Modules that honor these variables will compile against our freshly
    built `redismodule.h` and can use our `redis-server` for test
    harnesses. Modules that ignore them are unaffected.
-3. Build stops on the first failing module (fail-fast).
-4. Final output lists `src/redis-server` plus every `.so` produced per
+4. Build stops on the first failing module (fail-fast).
+5. Final output lists `src/redis-server` plus every `.so` produced per
    module.
 
-If no modules have been cloned yet, only Redis is built.
-
 Variables pass through: `make build VAR=value …`.
+
+Examples:
+
+```bash
+make build                          # Redis + all cloned modules
+make build redis                    # Redis only
+make build redistimeseries          # Redis + just one module
+make build redistimeseries redisbloom
+```
 
 ---
 
@@ -126,9 +160,9 @@ Selection:
 | `none` | Start Redis with no modules |
 | `<name> [<name> ...]` | Load only the listed modules |
 
-The `.so` path is discovered via `find` under each module's directory
-using the filename from `TARGET_MODULE` (e.g. `rejson.so` for redisjson),
-so **no hardcoded platform paths** — it works across macOS and Linux
+The `.so` path is discovered via `find` under `modules/<name>/` using
+the filename from `TARGET_MODULE` (e.g. `rejson.so` for redisjson), so
+**no hardcoded platform paths** — it works across macOS and Linux
 regardless of each module's `FULL_VARIANT` naming (`macos-arm64v8-release`,
 `linux-x64-release`, etc.). Release builds are preferred over debug
 builds; `CMakeFiles/`, `tests/`, `samples/` are excluded.
@@ -240,7 +274,7 @@ brew install make
 # Use `gmake` instead of `make` for everything below.
 
 # Module test dependencies (Python)
-pip3 install -r deps/modules/<name>/tests/flow/requirements.txt
+pip3 install -r modules/<name>/src/tests/flow/requirements.txt
 # redistimeseries' test_short_read.py also needs gevent on macOS,
 # which its requirements.txt leaves commented out:
 pip3 install gevent
@@ -254,11 +288,11 @@ Python 3.13 or 3.12 is a safer bet than 3.14 if a wheel fails to build.
 
 ```bash
 # First time:
-make modules clone all                        # fetch every module at its pin
+make modules-update all                       # fetch every module at its pin
 make build                                    # build Redis, then every module
 
 # Iterate:
-make modules update redisbloom                # bump to the current pin
+make modules-update redisbloom                # bump to the current pin (re-runs are safe)
 make build                                    # rebuild
 make run redistimeseries redisbloom           # start Redis with just these two
 
@@ -277,10 +311,11 @@ make test all                                 # every module
 ## 8. Full command reference
 
 ```
-make modules [clone|update] <name> [<name> ...]
-make modules-update <name> [<name> ...]       # alias
+make modules-update <name> [<name> ...]      # idempotent: clones if missing, else updates to pin
+make modules <name> [<name> ...]             # alias of modules-update
+make modules-unshallow <name> [<name> ...]   # convert shallow clone(s) to full history
 
-make build [VAR=value ...]
+make build [<name> ...|all|.|'*'|redis|none] [VAR=value ...]
 
 make run [<name> ...] [ARGS="<redis-server args>"]
 

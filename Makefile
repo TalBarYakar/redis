@@ -11,16 +11,11 @@ endif
 default: all
 
 # ----------------------------------------------------------------------------
-# `make modules [clone|update] <name> [<name> ...]`
+# `make modules-update <name> [<name> ...]`   (alias: `make modules <name> ...`)
 #
-# Subcommands:
-#   clone   (default)  Shallow-clone the selected module(s) into
-#                      $(DEPS_MODULES_DIR) (default: deps/modules).
-#   update             Ensure already-cloned module(s) match the current pin
-#                      and re-sync their submodules. Safe to re-run.
-#
-# `make modules-update <name> ...` is kept as an alias of
-# `make modules update <name> ...`.
+# Idempotent: if the module is not yet cloned at modules/<name>/src/, clones
+# it at the pinned ref. If it is already cloned, fast-forwards/checks-out
+# the current pin and re-syncs submodules. Safe to re-run.
 #
 # Pin variables (in each modules/<name>/Makefile):
 #   MODULE_REPO    - required, git URL
@@ -28,39 +23,39 @@ default: all
 #                    when non-empty. Empty string is ignored.
 #   MODULE_VERSION - tag or branch; used when MODULE_COMMIT is empty.
 #
-# Name expansion: `all`, `.`, or '*' (quote the star) clones/updates every
-# module under modules/ that pins MODULE_REPO.
+# Name expansion: `all`, `.`, or '*' (quote the star) targets every module
+# under modules/ that pins MODULE_REPO.
 # ----------------------------------------------------------------------------
-DEPS_MODULES_DIR ?= deps/modules
-# Only modules whose Makefile pins MODULE_REPO can be cloned this way
+# Only modules whose Makefile pins MODULE_REPO are managed this way
 # (e.g. vector-sets lives in-tree, so it's excluded).
 AVAILABLE_MODULES := $(sort $(shell grep -l '^[[:space:]]*MODULE_REPO[[:space:]]*=' modules/*/Makefile 2>/dev/null | sed -E 's|modules/([^/]+)/Makefile|\1|'))
 
 MODULES_GOALS := modules modules-update
-MODULES_SUBCMDS := clone update
 ifneq ($(filter $(MODULES_GOALS),$(firstword $(MAKECMDGOALS))),)
-  MODULES_RAW := $(filter-out $(MODULES_GOALS),$(MAKECMDGOALS))
-  # First word may be a subcommand (clone|update); strip it if so.
-  ifneq ($(filter $(MODULES_SUBCMDS),$(firstword $(MODULES_RAW))),)
-    MODULES_ACTION := $(firstword $(MODULES_RAW))
-    MODULES_ARGS := $(wordlist 2,$(words $(MODULES_RAW)),$(MODULES_RAW))
-  else
-    MODULES_ARGS := $(MODULES_RAW)
-    ifeq ($(firstword $(MAKECMDGOALS)),modules-update)
-      MODULES_ACTION := update
-    else
-      MODULES_ACTION := clone
-    endif
-  endif
-  # Turn the extra goals (subcommand + names) into no-op targets so .DEFAULT
+  MODULES_ARGS := $(filter-out $(MODULES_GOALS),$(MAKECMDGOALS))
+  # Turn the extra goals (module names) into no-op targets so .DEFAULT
   # below doesn't try to build them by recursing into $(SUBDIRS).
-  $(foreach m,$(MODULES_RAW),$(eval .PHONY: $(m))$(eval $(m): ; @:))
+  $(foreach m,$(MODULES_ARGS),$(eval .PHONY: $(m))$(eval $(m): ; @:))
+endif
+
+# `make modules-unshallow <name> [<name> ...]` — fetch full history for the
+# selected module(s)' shallow clones (so tools like Git Graph / `git log`
+# show the full commit tree instead of only the pinned tip).
+ifeq ($(firstword $(MAKECMDGOALS)),modules-unshallow)
+  UNSHALLOW_ARGS := $(filter-out modules-unshallow,$(MAKECMDGOALS))
+  $(foreach m,$(UNSHALLOW_ARGS),$(eval .PHONY: $(m))$(eval $(m): ; @:))
 endif
 
 # `make run <name> [<name> ...]` captures module names the same way.
 ifeq ($(firstword $(MAKECMDGOALS)),run)
   RUN_ARGS := $(filter-out run,$(MAKECMDGOALS))
   $(foreach m,$(RUN_ARGS),$(eval .PHONY: $(m))$(eval $(m): ; @:))
+endif
+
+# `make build [<name> ...]` — same capture.
+ifeq ($(firstword $(MAKECMDGOALS)),build)
+  BUILD_ARGS := $(filter-out build,$(MAKECMDGOALS))
+  $(foreach m,$(BUILD_ARGS),$(eval .PHONY: $(m))$(eval $(m): ; @:))
 endif
 
 # `make test [all|<module> [<test_name>]]` capture — same trick.
@@ -84,14 +79,22 @@ install:
 	for dir in $(SUBDIRS); do $(MAKE) -C $$dir $@; done
 
 # ----------------------------------------------------------------------------
-# `make build [VAR=value ...]`
+# `make build [<name> ...|all|.|'*'|none|redis] [VAR=value ...]`
+#
+# Module selection:
+#   (no args)            build Redis + every cloned module
+#   all / . / '*'        same as no args
+#   redis / none         build Redis only; skip modules
+#   <name> [<name> ...]  build Redis + only the listed modules
 #
 # Build order (important):
 #   1. Build the main Redis (via `$(MAKE) -C src all`). If this fails we do
 #      NOT attempt any module builds.
-#   2. For every cloned module under $(DEPS_MODULES_DIR), invoke `$(MAKE)` in
-#      the module's root directory, passing:
+#   2. For each selected cloned module, invoke `$(MAKE) -C modules/<name>`
+#      (the wrapper, which uses common.mk to descend into modules/<name>/src/),
+#      passing:
 #        RM_INCLUDE_DIR=$(CURDIR)/src   # our freshly built redismodule.h
+#        RS_INCLUDE_DIR=$(CURDIR)/src
 #        REDIS_SERVER=$(CURDIR)/src/redis-server
 #      so each module compiles against the exact RedisModule API it will be
 #      dlopen()'d into, and so any test harness run from the module points at
@@ -103,18 +106,42 @@ install:
 # ----------------------------------------------------------------------------
 build:
 	@set -e; \
+	requested="$(BUILD_ARGS)"; \
+	cloned=""; \
+	for name in $(AVAILABLE_MODULES); do \
+		[ -d "modules/$$name/src/.git" ] || continue; \
+		cloned="$$cloned $$name"; \
+	done; \
+	cloned=$$(echo $$cloned); \
+	case "$$requested" in \
+		""|all|.|'*') modules="$$cloned" ;; \
+		redis|none) modules="" ;; \
+		*) \
+			for r in $$requested; do \
+				case "$$r" in all|.|'*'|redis|none) \
+					echo "ERROR: '$$r' cannot be mixed with explicit module names"; exit 1 ;; \
+				esac; \
+				found=""; \
+				for c in $$cloned; do [ "$$c" = "$$r" ] && found=1; done; \
+				if [ -z "$$found" ]; then \
+					echo "ERROR: module '$$r' is not cloned under modules/$$r/src"; \
+					echo "Cloned modules: $$cloned"; \
+					echo "Hint: available pinned modules are: $(AVAILABLE_MODULES)"; \
+					echo "      (run 'make modules-update $$r' first if it's one of those)"; \
+					exit 1; \
+				fi; \
+			done; \
+			modules="$$requested" ;; \
+	esac; \
 	echo "==> Building main Redis (src/)"; \
 	$(MAKE) -C src all; \
-	modules=""; \
-	if [ -d "$(DEPS_MODULES_DIR)" ]; then \
-		for d in "$(DEPS_MODULES_DIR)"/*/; do \
-			[ -d "$$d/.git" ] || continue; \
-			modules="$$modules $$(basename "$$d")"; \
-		done; \
-	fi; \
 	if [ -z "$$modules" ]; then \
 		echo; \
-		echo "==> No cloned modules under $(DEPS_MODULES_DIR), skipping module builds"; \
+		if [ -z "$$cloned" ]; then \
+			echo "==> No cloned modules under modules/*/src, Redis-only build"; \
+		else \
+			echo "==> Module builds skipped by request"; \
+		fi; \
 	else \
 		echo; \
 		echo "==> Building modules against $(CURDIR)/src (RM_INCLUDE_DIR) and $(CURDIR)/src/redis-server:"; \
@@ -122,8 +149,8 @@ build:
 		failed=""; \
 		for name in $$modules; do \
 			echo; \
-			echo "==> [module] $$name ($(DEPS_MODULES_DIR)/$$name)"; \
-			if ! $(MAKE) -C "$(DEPS_MODULES_DIR)/$$name" \
+			echo "==> [module] $$name (modules/$$name)"; \
+			if ! $(MAKE) -C "modules/$$name" \
 				RM_INCLUDE_DIR="$(CURDIR)/src" \
 				RS_INCLUDE_DIR="$(CURDIR)/src" \
 				REDIS_SERVER="$(CURDIR)/src/redis-server"; then \
@@ -143,7 +170,7 @@ build:
 	if [ -n "$$modules" ]; then \
 		echo "    Module artifacts:"; \
 		for name in $$modules; do \
-			sos=$$(find "$(DEPS_MODULES_DIR)/$$name" -type f -name '*.so' 2>/dev/null); \
+			sos=$$(find "modules/$$name" -type f -name '*.so' 2>/dev/null); \
 			if [ -n "$$sos" ]; then \
 				printf "      %-20s " "$$name:"; echo "$$sos" | head -1; \
 				echo "$$sos" | tail -n +2 | sed 's|^|                           |'; \
@@ -158,17 +185,17 @@ build:
 #
 # Starts src/redis-server with selected built module(s) auto-loaded via
 # `--loadmodule`. Module selection:
-#   (no args)            load every cloned module under $(DEPS_MODULES_DIR)
+#   (no args)            load every cloned module under modules/*/src
 #   all / . / '*'        same as no args
 #   none                 start with no modules at all
 #   <name> [<name> ...]  load only the named modules
 #
 # The expected .so basename per module is read from TARGET_MODULE in
 # modules/<name>/Makefile (handles quirks like redisjson → rejson.so).
-# The actual .so path is located via `find` under $(DEPS_MODULES_DIR)/<name>/,
-# so it works on any OS/arch without hardcoded `linux-x64-release` etc.
-# Release builds are preferred over debug; paths under CMakeFiles/ and
-# known test dirs are excluded.
+# The actual .so path is located via `find` under modules/<name>/, so it
+# works on any OS/arch without hardcoded `linux-x64-release` etc. Release
+# builds are preferred over debug; paths under CMakeFiles/ and known test
+# dirs are excluded.
 #
 # Extra server flags/config pass via ARGS:
 #   make run ARGS="--port 6400 --daemonize no"
@@ -182,12 +209,10 @@ run:
 	fi; \
 	requested="$(RUN_ARGS)"; \
 	cloned=""; \
-	if [ -d "$(DEPS_MODULES_DIR)" ]; then \
-		for d in "$(DEPS_MODULES_DIR)"/*/; do \
-			[ -d "$$d/.git" ] || continue; \
-			cloned="$$cloned $$(basename "$$d")"; \
-		done; \
-	fi; \
+	for name in $(AVAILABLE_MODULES); do \
+		[ -d "modules/$$name/src/.git" ] || continue; \
+		cloned="$$cloned $$name"; \
+	done; \
 	cloned=$$(echo $$cloned); \
 	case "$$requested" in \
 		""|all|.|'*') selected="$$cloned" ;; \
@@ -200,7 +225,7 @@ run:
 				found=""; \
 				for c in $$cloned; do [ "$$c" = "$$r" ] && found=1; done; \
 				if [ -z "$$found" ]; then \
-					echo "ERROR: module '$$r' is not cloned under $(DEPS_MODULES_DIR)"; \
+					echo "ERROR: module '$$r' is not cloned under modules/$$r/src"; \
 					echo "Cloned modules: $$cloned"; \
 					exit 1; \
 				fi; \
@@ -216,7 +241,7 @@ run:
 			so_base=$$(basename "$$target"); \
 		fi; \
 		[ -z "$$so_base" ] && so_base="$$name.so"; \
-		name_dir="$(DEPS_MODULES_DIR)/$$name"; \
+		name_dir="modules/$$name"; \
 		candidates=$$(find "$$name_dir" -type f -name "$$so_base" 2>/dev/null \
 			| grep -v -E '/(CMakeFiles|tests?|sample|samples|fixtures)/' || true); \
 		so_path=$$(echo "$$candidates" | grep -E '(^|/)(release|[^/]*-release)(/|$$)' | head -1); \
@@ -268,12 +293,10 @@ test:
 	set -- $$args; \
 	target="$$1"; shift; \
 	cloned=""; \
-	if [ -d "$(DEPS_MODULES_DIR)" ]; then \
-		for d in "$(DEPS_MODULES_DIR)"/*/; do \
-			[ -d "$$d/.git" ] || continue; \
-			cloned="$$cloned $$(basename "$$d")"; \
-		done; \
-	fi; \
+	for name in $(AVAILABLE_MODULES); do \
+		[ -d "modules/$$name/src/.git" ] || continue; \
+		cloned="$$cloned $$name"; \
+	done; \
 	cloned=$$(echo $$cloned); \
 	case "$$target" in \
 		all|.|'*') \
@@ -283,7 +306,7 @@ test:
 				exit 1; \
 			fi; \
 			if [ -z "$$cloned" ]; then \
-				echo "ERROR: no cloned modules under $(DEPS_MODULES_DIR)"; \
+				echo "ERROR: no cloned modules under modules/*/src"; \
 				echo "       run 'make modules all' and 'make build' first"; \
 				exit 1; \
 			fi; \
@@ -291,8 +314,8 @@ test:
 			failed=""; \
 			for name in $$cloned; do \
 				echo; \
-				echo "==> [test] $$name ($(DEPS_MODULES_DIR)/$$name)"; \
-				if ! $(MAKE) -C "$(DEPS_MODULES_DIR)/$$name" test; then \
+				echo "==> [test] $$name (modules/$$name/src)"; \
+				if ! $(MAKE) -C "modules/$$name/src" test; then \
 					failed="$$failed $$name"; \
 				fi; \
 			done; \
@@ -307,7 +330,7 @@ test:
 			ok=""; \
 			for c in $$cloned; do [ "$$c" = "$$target" ] && ok=1; done; \
 			if [ -z "$$ok" ]; then \
-				echo "ERROR: module '$$target' is not cloned under $(DEPS_MODULES_DIR)"; \
+				echo "ERROR: module '$$target' is not cloned under modules/$$target/src"; \
 				echo "Cloned modules: $$cloned"; \
 				echo "Usage:"; \
 				echo "  make test                             # run Redis tests"; \
@@ -330,21 +353,20 @@ test:
 			fi; \
 			if [ -z "$$tname" ]; then \
 				echo "==> Running all tests for module '$$target'"; \
-				exec $(MAKE) -C "$(DEPS_MODULES_DIR)/$$target" test; \
+				exec $(MAKE) -C "modules/$$target/src" test; \
 			else \
 				echo "==> Running test '$$tname' for module '$$target' (TEST=$$tname)"; \
-				exec $(MAKE) -C "$(DEPS_MODULES_DIR)/$$target" test TEST="$$tname"; \
+				exec $(MAKE) -C "modules/$$target/src" test TEST="$$tname"; \
 			fi \
 			;; \
 	esac
 
 modules modules-update:
-	@action="$(MODULES_ACTION)"; \
-	available="$(AVAILABLE_MODULES)"; \
+	@available="$(AVAILABLE_MODULES)"; \
 	requested="$(MODULES_ARGS)"; \
 	if [ -z "$$requested" ]; then \
-		echo "Usage: make modules [clone|update] <name> [<name> ...]"; \
-		echo "       make modules $$action all    # or '.' or '*' (quote the star)"; \
+		echo "Usage: make modules-update <name> [<name> ...]"; \
+		echo "       make modules-update all    # or '.' or '*' (quote the star)"; \
 		echo "Available modules: $$available"; \
 		exit 1; \
 	fi; \
@@ -353,7 +375,6 @@ modules modules-update:
 			all|.|'*') requested="$$available"; break ;; \
 		esac; \
 	done; \
-	if [ "$$action" = "clone" ]; then mkdir -p "$(DEPS_MODULES_DIR)"; fi; \
 	for name in $$requested; do \
 		mkfile="modules/$$name/Makefile"; \
 		if [ ! -f "$$mkfile" ]; then \
@@ -364,18 +385,14 @@ modules modules-update:
 		version=$$(awk -F'=' '/^[[:space:]]*MODULE_VERSION[[:space:]]*=/ {gsub(/[ \t]/,"",$$2); print $$2; exit}' "$$mkfile"); \
 		commit=$$(awk -F'=' '/^[[:space:]]*MODULE_COMMIT[[:space:]]*=/ {gsub(/[ \t]/,"",$$2); print $$2; exit}' "$$mkfile"); \
 		repo=$$(awk -F'=' '/^[[:space:]]*MODULE_REPO[[:space:]]*=/ {sub(/^[ \t]*/,"",$$2); sub(/[ \t]*$$/,"",$$2); print $$2; exit}' "$$mkfile"); \
-		dest="$(DEPS_MODULES_DIR)/$$name"; \
-		if [ "$$action" = "clone" ]; then \
-			if [ -z "$$repo" ]; then \
-				echo "ERROR: MODULE_REPO is not set in $$mkfile"; exit 1; \
-			fi; \
-			if [ -z "$$commit" ] && [ -z "$$version" ]; then \
-				echo "ERROR: need either MODULE_COMMIT or MODULE_VERSION in $$mkfile"; exit 1; \
-			fi; \
-			if [ -d "$$dest/.git" ]; then \
-				echo "==> $$name already cloned at $$dest, skipping (use 'make modules update $$name' to refresh)"; \
-				continue; \
-			fi; \
+		dest="modules/$$name/src"; \
+		if [ -z "$$repo" ]; then \
+			echo "ERROR: MODULE_REPO is not set in $$mkfile"; exit 1; \
+		fi; \
+		if [ -z "$$commit" ] && [ -z "$$version" ]; then \
+			echo "ERROR: need either MODULE_COMMIT or MODULE_VERSION in $$mkfile"; exit 1; \
+		fi; \
+		if [ ! -d "$$dest/.git" ]; then \
 			rm -rf "$$dest"; \
 			if [ -n "$$commit" ]; then \
 				echo "==> Cloning $$name @ commit $$commit from $$repo into $$dest"; \
@@ -392,10 +409,6 @@ modules modules-update:
 				git clone --recursive --depth 1 --branch "$$version" "$$repo" "$$dest"; \
 			fi; \
 		else \
-			if [ ! -d "$$dest/.git" ]; then \
-				echo "ERROR: $$name is not cloned at $$dest (run 'make modules $$name' first)"; \
-				exit 1; \
-			fi; \
 			if [ -n "$$commit" ]; then \
 				current=$$(git -C "$$dest" rev-parse HEAD); \
 				if [ "$$current" = "$$commit" ] || [ "$${current#$$commit}" != "$$current" ]; then \
@@ -408,20 +421,100 @@ modules modules-update:
 					fi; \
 					git -C "$$dest" checkout -f --detach "$$commit"; \
 				fi; \
-			elif [ -n "$$version" ]; then \
+			else \
 				echo "==> Ensuring $$name is at $$version"; \
 				git -C "$$dest" fetch --depth 1 origin "$$version" 2>/dev/null \
 					|| git -C "$$dest" fetch --depth 1 origin "refs/tags/$$version:refs/tags/$$version" 2>/dev/null \
 					|| git -C "$$dest" fetch origin; \
 				git -C "$$dest" checkout -f "$$version" 2>/dev/null \
 					|| git -C "$$dest" reset --hard FETCH_HEAD; \
-			else \
-				echo "WARNING: no MODULE_COMMIT or MODULE_VERSION in $$mkfile, skipping ref update"; \
 			fi; \
 			echo "==> Re-syncing submodules for $$name"; \
 			git -C "$$dest" submodule sync --recursive; \
 			git -C "$$dest" submodule update --init --recursive --depth 1; \
 		fi; \
+		touch "$$dest/.prepared"; \
 	done
 
-.PHONY: install build run test modules modules-update
+# ----------------------------------------------------------------------------
+# `make modules-unshallow <name> [<name> ...]`
+#
+# `make modules-update` does a shallow, single-branch clone (--depth 1
+# --branch <ref>) for speed, which leaves Git Graph / `git log` showing
+# only the pinned tip and only that one branch. This target:
+#
+#   1. broadens origin's fetch refspec back to all branches and tags
+#      (overwriting the single-branch refspec git wrote on clone);
+#   2. fetches the full history (`--unshallow`) so every commit reachable
+#      from any branch/tag becomes available locally;
+#   3. does the same for each submodule.
+#
+# Idempotent: if the repo already has full history AND the broad
+# refspec is already in place, nothing to do.
+#
+# Selection follows the same conventions as `make modules-update`:
+#   <name> [<name> ...]   selected modules
+#   all / . / '*'         every cloned module
+# ----------------------------------------------------------------------------
+modules-unshallow:
+	@requested="$(UNSHALLOW_ARGS)"; \
+	available="$(AVAILABLE_MODULES)"; \
+	cloned=""; \
+	for name in $$available; do \
+		[ -d "modules/$$name/src/.git" ] && cloned="$$cloned $$name"; \
+	done; \
+	cloned=$$(echo $$cloned); \
+	if [ -z "$$requested" ]; then \
+		echo "Usage: make modules-unshallow <name> [<name> ...]"; \
+		echo "       make modules-unshallow all   # or '.' or '*' (quote the star)"; \
+		echo "Cloned modules: $$cloned"; \
+		exit 1; \
+	fi; \
+	for r in $$requested; do \
+		case "$$r" in \
+			all|.|'*') requested="$$cloned"; break ;; \
+		esac; \
+	done; \
+	if [ -z "$$cloned" ]; then \
+		echo "ERROR: no cloned modules under modules/*/src"; \
+		echo "       run 'make modules-update all' first"; \
+		exit 1; \
+	fi; \
+	broaden_refspec() { \
+		repo="$$1"; \
+		git -C "$$repo" config --unset-all remote.origin.fetch 2>/dev/null || true; \
+		git -C "$$repo" config --add remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'; \
+		git -C "$$repo" config --bool remote.origin.tagopt false 2>/dev/null || true; \
+	}; \
+	for name in $$requested; do \
+		dest="modules/$$name/src"; \
+		if [ ! -d "$$dest/.git" ]; then \
+			echo "ERROR: module '$$name' is not cloned at $$dest"; \
+			echo "Cloned modules: $$cloned"; \
+			exit 1; \
+		fi; \
+		echo "==> Broadening origin refspec for $$name ($$dest)"; \
+		broaden_refspec "$$dest"; \
+		if [ -f "$$dest/.git/shallow" ]; then \
+			echo "==> Fetching full history + all branches/tags for $$name"; \
+			git -C "$$dest" fetch --unshallow --tags origin '+refs/heads/*:refs/remotes/origin/*' \
+				|| git -C "$$dest" fetch --depth=2147483647 --tags origin '+refs/heads/*:refs/remotes/origin/*'; \
+		else \
+			echo "==> Fetching all branches/tags for $$name (already deep)"; \
+			git -C "$$dest" fetch --tags origin '+refs/heads/*:refs/remotes/origin/*'; \
+		fi; \
+		echo "==> Same treatment for $$name submodules"; \
+		git -C "$$dest" submodule foreach --recursive ' \
+			git config --unset-all remote.origin.fetch 2>/dev/null || true; \
+			git config --add remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"; \
+			if [ -f .git/shallow ] || [ -f "$$(git rev-parse --git-dir)/shallow" ]; then \
+				git fetch --unshallow --tags origin "+refs/heads/*:refs/remotes/origin/*" 2>/dev/null \
+					|| git fetch --depth=2147483647 --tags origin "+refs/heads/*:refs/remotes/origin/*" \
+					|| true; \
+			else \
+				git fetch --tags origin "+refs/heads/*:refs/remotes/origin/*" || true; \
+			fi'; \
+		touch "$$dest/.prepared"; \
+	done
+
+.PHONY: install build run test modules modules-update modules-unshallow
