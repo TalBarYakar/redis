@@ -41,3 +41,8 @@ Makefile.dep
 .ccls-cache/*
 compile_commands.json
 redis.code-workspace
+
+modules/redisbloom/src/
+modules/redisearch/src/
+modules/redisjson/src/
+modules/redistimeseries/src/
