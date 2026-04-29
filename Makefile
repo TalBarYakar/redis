@@ -17,18 +17,19 @@ default: all
 # it at the pinned ref. If it is already cloned, fast-forwards/checks-out
 # the current pin and re-syncs submodules. Safe to re-run.
 #
-# Pin variables (in each modules/<name>/Makefile):
-#   MODULE_REPO    - required, git URL
-#   MODULE_COMMIT  - optional SHA; takes precedence over MODULE_VERSION
-#                    when non-empty. Empty string is ignored.
-#   MODULE_VERSION - tag or branch; used when MODULE_COMMIT is empty.
+# Pin data is loaded from `modules.yaml` at repo root via
+# `utils/releasetools/modules-manifest.sh`. Each entry there carries:
+#   repo     - required, git URL
+#   version  - tag or branch; used when `commit` is empty
+#   commit   - optional SHA; takes precedence over `version` when non-empty
 #
 # Name expansion: `all`, `.`, or '*' (quote the star) targets every module
-# under modules/ that pins MODULE_REPO.
+# listed in modules.yaml.
 # ----------------------------------------------------------------------------
-# Only modules whose Makefile pins MODULE_REPO are managed this way
-# (e.g. vector-sets lives in-tree, so it's excluded).
-AVAILABLE_MODULES := $(sort $(shell grep -l '^[[:space:]]*MODULE_REPO[[:space:]]*=' modules/*/Makefile 2>/dev/null | sed -E 's|modules/([^/]+)/Makefile|\1|'))
+# Manifest parsing (modules.yaml → AVAILABLE_MODULES + helpers). Both the
+# top-level Makefile and modules/common.mk include this so a per-module
+# build (`make -C modules/<name>`) sees the same data.
+include modules/manifest.mk
 
 MODULES_GOALS := modules modules-update
 ifneq ($(filter $(MODULES_GOALS),$(firstword $(MAKECMDGOALS))),)
@@ -358,10 +359,12 @@ run:
 	exec src/redis-server $$load_flags $(ARGS)
 
 # ----------------------------------------------------------------------------
-# `make test [all|<module> [<test_name>]] [TEST=<name>]`
+# `make test [redis|all|<module> [<test_name>]] [TEST=<name>]`
 #
 # Dispatches test execution:
 #   make test                         run Redis tests (make -C src test)
+#   make test redis | none            same — Redis tests only, no modules
+#                                     (mirrors `make build redis|none`)
 #   make test all | . | '*'           run `make test` for every cloned module
 #   make test <module>                run full test suite for one module
 #   make test <module> <test_name>    run a single test in one module
@@ -397,6 +400,15 @@ test:
 	done; \
 	cloned=$$(echo $$cloned); \
 	case "$$target" in \
+		redis|none) \
+			if [ $$# -gt 0 ] || [ -n "$$test_var" ]; then \
+				echo "ERROR: cannot pass a test name together with '$$target'"; \
+				echo "       ('$$target' selects Redis tests only — no module test name applies)"; \
+				exit 1; \
+			fi; \
+			echo "==> Running Redis tests (src/)"; \
+			exec $(MAKE) -C src test; \
+			;; \
 		all|.|'*') \
 			if [ $$# -gt 0 ] || [ -n "$$test_var" ]; then \
 				echo "ERROR: cannot pass a test name together with '$$target'"; \
@@ -432,6 +444,7 @@ test:
 				echo "Cloned modules: $$cloned"; \
 				echo "Usage:"; \
 				echo "  make test                             # run Redis tests"; \
+				echo "  make test redis                       # run Redis tests (explicit)"; \
 				echo "  make test all                         # run tests for every cloned module"; \
 				echo "  make test <module>                    # run all tests for one module"; \
 				echo "  make test <module> <test_name>        # run a single test (positional)"; \
@@ -474,21 +487,20 @@ modules modules-update:
 		esac; \
 	done; \
 	for name in $$requested; do \
-		mkfile="modules/$$name/Makefile"; \
-		if [ ! -f "$$mkfile" ]; then \
-			echo "ERROR: unknown module '$$name' (expected $$mkfile)"; \
+		case " $$available " in *" $$name "*) ;; *) \
+			echo "ERROR: unknown module '$$name' (not listed in modules.yaml)"; \
 			echo "Available modules: $$available"; \
-			exit 1; \
-		fi; \
-		version=$$(awk -F'=' '/^[[:space:]]*MODULE_VERSION[[:space:]]*=/ {gsub(/[ \t]/,"",$$2); print $$2; exit}' "$$mkfile"); \
-		commit=$$(awk -F'=' '/^[[:space:]]*MODULE_COMMIT[[:space:]]*=/ {gsub(/[ \t]/,"",$$2); print $$2; exit}' "$$mkfile"); \
-		repo=$$(awk -F'=' '/^[[:space:]]*MODULE_REPO[[:space:]]*=/ {sub(/^[ \t]*/,"",$$2); sub(/[ \t]*$$/,"",$$2); print $$2; exit}' "$$mkfile"); \
+			exit 1 ;; \
+		esac; \
+		repo=$$(awk    -v want="$$name" -v field=repo    '$(MANIFEST_FIELD_AWK)' $(MODULES_MANIFEST_FILE)); \
+		version=$$(awk -v want="$$name" -v field=version '$(MANIFEST_FIELD_AWK)' $(MODULES_MANIFEST_FILE)); \
+		commit=$$(awk  -v want="$$name" -v field=commit  '$(MANIFEST_FIELD_AWK)' $(MODULES_MANIFEST_FILE)); \
 		dest="modules/$$name/src"; \
 		if [ -z "$$repo" ]; then \
-			echo "ERROR: MODULE_REPO is not set in $$mkfile"; exit 1; \
+			echo "ERROR: 'repo' is not set for '$$name' in modules.yaml"; exit 1; \
 		fi; \
 		if [ -z "$$commit" ] && [ -z "$$version" ]; then \
-			echo "ERROR: need either MODULE_COMMIT or MODULE_VERSION in $$mkfile"; exit 1; \
+			echo "ERROR: need either 'commit' or 'version' for '$$name' in modules.yaml"; exit 1; \
 		fi; \
 		if [ ! -d "$$dest/.git" ]; then \
 			rm -rf "$$dest"; \

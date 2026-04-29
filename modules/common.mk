@@ -2,6 +2,16 @@ PREFIX ?= /usr/local
 INSTALL_DIR ?= $(DESTDIR)$(PREFIX)/lib/redis/modules
 INSTALL ?= install
 
+# Pin data (repo URL, branch/tag, optional commit SHA) is loaded from
+# `modules.yaml` at repo root via the awk-based parser in manifest.mk,
+# keyed on the basename of the current module directory (e.g. `redisbloom`).
+# `?=` keeps the door open for an explicit override in a per-module Makefile.
+include $(dir $(lastword $(MAKEFILE_LIST)))manifest.mk
+MODULE_NAME    ?= $(notdir $(CURDIR))
+MODULE_REPO    ?= $(call manifest-field,repo,$(MODULE_NAME))
+MODULE_VERSION ?= $(call manifest-field,version,$(MODULE_NAME))
+MODULE_COMMIT  ?= $(call manifest-field,commit,$(MODULE_NAME))
+
 # This logic *partially* follows the current module build system. It is a bit awkward and
 # should be changed if/when the modules' build process is refactored.
 

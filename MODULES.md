@@ -17,30 +17,50 @@ Everywhere below, `make` means "GNU make"; substitute `gmake` on macOS.
 
 | Path | Role |
 |---|---|
-| `modules/<name>/Makefile` | Pin file — declares `MODULE_REPO`, `MODULE_VERSION`, optional `MODULE_COMMIT`, `TARGET_MODULE` |
-| `modules/common.mk` | Shared helpers included by each pin file |
+| `modules.yaml` | **Single source of truth** for which upstream repo / ref / SHA each external module is pinned to |
+| `modules/manifest.mk` | Awk-in-Make parser for `modules.yaml`; included by both the top-level `Makefile` and `common.mk` (no yq/python/sh dep) |
+| `modules/<name>/Makefile` | Per-module build wrapper — declares `TARGET_MODULE` (the produced `.so` path) and `include`s `common.mk` |
+| `modules/common.mk` | Shared helpers; pulls `MODULE_REPO`/`MODULE_VERSION`/`MODULE_COMMIT` from the manifest via `manifest.mk` |
 | `modules/<name>/src/` | Checkout location — created by `make modules-update` |
 | `src/redis-server` | Redis binary — produced by `make build` |
 
-Only modules whose `modules/<name>/Makefile` pins `MODULE_REPO` are
-considered "external". In-tree modules (e.g. `vector-sets`) are excluded.
+Only modules listed in `modules.yaml` are considered "external" — those
+are the ones managed by `make modules-update`. In-tree modules (e.g.
+`vector-sets`) are intentionally absent from the manifest and live under
+`modules/<name>/` without a `src/` subdirectory or a manifest entry.
 
-### Pin variables
+### Pin manifest (`modules.yaml`)
 
-Each `modules/<name>/Makefile` declares:
+Single file, one entry per managed module:
+
+```yaml
+modules:
+  - name: redistimeseries
+    repo: https://github.com/redistimeseries/redistimeseries
+    version: v8.7.90        # tag or branch
+    commit:                 # optional SHA; overrides `version` when non-empty
+```
+
+Precedence when both are set: `commit` wins over `version`. Leave
+`commit:` empty to track the tag/branch.
+
+To bump a module: edit its entry and run `make modules-update <name>`.
+That's the only place pins live — the per-module `Makefile` only carries
+build-system data (`TARGET_MODULE`).
+
+### Per-module `Makefile`
 
 ```make
-SRC_DIR        = src
-MODULE_VERSION = v8.7.90          # tag or branch
-MODULE_COMMIT  =                  # optional SHA; overrides MODULE_VERSION when non-empty
-MODULE_REPO    = https://github.com/redistimeseries/redistimeseries
-TARGET_MODULE  = $(SRC_DIR)/bin/$(FULL_VARIANT)/redistimeseries.so
+SRC_DIR       = src
+TARGET_MODULE = $(SRC_DIR)/bin/$(FULL_VARIANT)/redistimeseries.so
 
 include ../common.mk
 ```
 
-Precedence when both are set: `MODULE_COMMIT` wins over `MODULE_VERSION`.
-Leave `MODULE_COMMIT` empty to track the tag/branch.
+`common.mk` includes `manifest.mk` and resolves
+`MODULE_REPO`/`MODULE_VERSION`/`MODULE_COMMIT` automatically via
+`$(call manifest-field,<field>,$(notdir $(CURDIR)))` — i.e. the per-module
+directory name is the manifest key.
 
 ---
 
@@ -60,7 +80,7 @@ Name expansion:
 | Argument | Selects |
 |---|---|
 | `<name>` | One module (e.g. `redistimeseries`) |
-| `all` / `.` / `'*'` | Every module with a `MODULE_REPO` pin (quote the star so the shell doesn't glob) |
+| `all` / `.` / `'*'` | Every module listed in `modules.yaml` (quote the star so the shell doesn't glob) |
 
 Examples:
 
@@ -195,7 +215,7 @@ skips it — it does not stop the other loads.
 ## 5. Test: `make test`
 
 ```bash
-make test [all|<module> [<test_name>]] [TEST=<name>]
+make test [redis|none|all|<module> [<test_name>]] [TEST=<name>]
 ```
 
 Dispatch:
@@ -203,6 +223,7 @@ Dispatch:
 | Command | Runs |
 |---|---|
 | `make test` | Redis tests only (`$(MAKE) -C src test`) |
+| `make test redis` / `none` | Same — Redis tests only (mirrors `make build redis`) |
 | `make test all` / `.` / `'*'` | `make test` in every cloned module; continues past failures and summarizes at the end |
 | `make test <module>` | `make test` in one module (full suite) |
 | `make test <module> <test_name>` | `make test TEST=<test_name>` in one module |
@@ -320,6 +341,7 @@ make build [<name> ...|all|.|'*'|redis|none] [VAR=value ...]
 make run [<name> ...] [ARGS="<redis-server args>"]
 
 make test
+make test redis | none                        # Redis tests only (explicit)
 make test all | . | '*'
 make test <module>
 make test <module> <test_name>

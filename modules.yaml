@@ -1,0 +1,43 @@
+# modules.yaml — release manifest for bundled Redis modules.
+#
+# Single source of truth for which upstream repo and ref each module is
+# pinned to. Consumed by:
+#   - `make modules-update` (top-level Makefile) to clone/refresh sources
+#     under modules/<name>/src/
+#   - modules/common.mk's per-module clone-on-build fallback
+#   - utils/releasetools/prepare_release.sh (planned) for release tarballs
+#
+# To bump a module: edit `version` (tag/branch) and/or `commit` (exact SHA;
+# takes precedence over `version` when non-empty), then run
+# `make modules-update <name>` to refresh the local clone.
+#
+# Format (kept deliberately simple so a small awk helper can parse it without
+# needing yq/python; see utils/releasetools/modules-manifest.sh):
+#   modules:
+#     - name: <module-name>            # directory under modules/
+#       repo: <git URL>
+#       version: <tag-or-branch>       # required if `commit` is empty
+#       commit: <sha-or-empty>         # optional; wins over `version`
+#
+# Notes:
+#   - `vector-sets` is intentionally absent — it lives in-tree under
+#     modules/vector-sets/ and is not cloned.
+#   - No inline comments after values; one field per line.
+
+modules:
+  - name: redisbloom
+    repo: https://github.com/redisbloom/redisbloom
+    version: tal.ba/feat/make_setup_ci_aligned
+    commit: 
+  - name: redisearch
+    repo: https://github.com/redisearch/redisearch
+    version: v8.7.90
+    commit:
+  - name: redisjson
+    repo: https://github.com/redisjson/redisjson
+    version: tal.ba/feat/make_setup_ci_aligned
+    commit:
+  - name: redistimeseries
+    repo: https://github.com/redistimeseries/redistimeseries
+    version: tal.ba/feat/make_setup_ci_aligned
+    commit:

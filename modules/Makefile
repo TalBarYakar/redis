@@ -1,5 +1,8 @@
 
-SUBDIRS = redisjson redistimeseries redisbloom redisearch
+# Module list comes from ../modules.yaml (single source of truth, also used
+# by `make modules-update` and modules/common.mk via modules/manifest.mk).
+include manifest.mk
+SUBDIRS = $(AVAILABLE_MODULES)
 
 define submake
 	for dir in $(SUBDIRS); do $(MAKE) -C $$dir $(1); done
