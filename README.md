@@ -280,7 +280,7 @@ Tested with the following Docker image:
 
    ```sh
    cd /usr/src/redis-<version>
-   ./src/redis-server redis-full.conf
+   ./src/redis-server redis.conf
    ```
 
 ### Build and run Redis with all data structures - Ubuntu 22.04 (Jammy)
@@ -346,7 +346,7 @@ Tested with the following Docker image:
 
    ```sh
    cd /usr/src/redis-<version>
-   ./src/redis-server redis-full.conf
+   ./src/redis-server redis.conf
    ```
 
 ### Build and run Redis with all data structures - Ubuntu 24.04 (Noble)
@@ -400,7 +400,7 @@ Tested with the following Docker image:
 
    ```sh
    cd /usr/src/redis-<version>
-   ./src/redis-server redis-full.conf
+   ./src/redis-server redis.conf
    ```
 
 ### Build and run Redis with all data structures - Debian 11 (Bullseye) / 12 (Bookworm)
@@ -457,7 +457,7 @@ Tested with the following Docker images:
 
    ```sh
    cd /usr/src/redis-<version>
-   ./src/redis-server redis-full.conf
+   ./src/redis-server redis.conf
    ```
 
 ### Build and run Redis with all data structures - AlmaLinux 8.10 / Rocky Linux 8.10
@@ -576,7 +576,7 @@ Tested with the following Docker images:
 
    ```sh
    cd /usr/src/redis-<version>
-   ./src/redis-server redis-full.conf
+   ./src/redis-server redis.conf
    ```
 
 ### Build and run Redis with all data structures - AlmaLinux 9.5 / Rocky Linux 9.5
@@ -693,7 +693,7 @@ Tested with the following Docker images:
 
    ```sh
    cd /usr/src/redis-<version>
-   ./src/redis-server redis-full.conf
+   ./src/redis-server redis.conf
    ```
 
 ### Build and run Redis with all data structures - macOS 13 (Ventura) and macOS 14 (Sonoma)
@@ -771,7 +771,7 @@ Tested with the following Docker images:
    ```sh
    export LC_ALL=en_US.UTF-8
    export LANG=en_US.UTF-8
-   build_dir/bin/redis-server redis-full.conf
+   build_dir/bin/redis-server redis.conf
    ```
 
 ### Build and run Redis with all data structures - macOS 15 (Sequoia)

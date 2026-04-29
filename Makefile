@@ -647,7 +647,7 @@ modules-unshallow:
 #
 # After `tar xzf redis-<tag>.tar.gz && cd redis-<tag>`, the user can run
 #   gmake BUILD_WITH_MODULES=yes INSTALL_RUST_TOOLCHAIN=yes DISABLE_WERRORS=yes
-#   ./src/redis-server redis-full.conf
+#   ./src/redis-server redis.conf
 # and have a working Redis + every bundled module loaded — without any git
 # fetches or `make modules-update` invocations.
 #

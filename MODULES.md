@@ -370,7 +370,7 @@ make release-tarball TAG=<tag> \
 
 ```
 redis-<tag>/
-├── (full Redis core source: src/, deps/, redis.conf, redis-full.conf,
+├── (full Redis core source: src/, deps/, redis.conf,
 │   modules.yaml, Makefile, MODULES.md, modules/{Makefile,common.mk,
 │   manifest.mk}, modules/<name>/Makefile, modules/vector-sets/, ...)
 └── modules/
@@ -386,7 +386,7 @@ redis-<tag>/
 tar xzf redis-<tag>.tar.gz
 cd redis-<tag>
 gmake BUILD_WITH_MODULES=yes INSTALL_RUST_TOOLCHAIN=yes DISABLE_WERRORS=yes
-./src/redis-server redis-full.conf
+./src/redis-server redis.conf
 ```
 
 No network access needed at build time — modules are already on disk.
