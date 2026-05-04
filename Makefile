@@ -122,8 +122,9 @@ build:
 	requested="$(BUILD_ARGS)"; \
 	cloned=""; \
 	for name in $(AVAILABLE_MODULES); do \
-		[ -f "modules/$$name/src/.prepared" ] || continue; \
-		cloned="$$cloned $$name"; \
+		if [ -f "modules/$$name/src/.prepared" ] || [ -e "modules/$$name/src/.git" ]; then \
+			cloned="$$cloned $$name"; \
+		fi; \
 	done; \
 	cloned=$$(echo $$cloned); \
 	case "$$requested" in \
@@ -137,10 +138,10 @@ build:
 				found=""; \
 				for c in $$cloned; do [ "$$c" = "$$r" ] && found=1; done; \
 				if [ -z "$$found" ]; then \
-					echo "ERROR: module '$$r' is not cloned under modules/$$r/src"; \
-					echo "Cloned modules: $$cloned"; \
-					echo "Hint: available pinned modules are: $(AVAILABLE_MODULES)"; \
-					echo "      (run 'make modules-update $$r' first if it's one of those)"; \
+					echo "ERROR: module '$$r' is not available under modules/$$r/src"; \
+					echo "  (expect .git or .prepared in modules/$$r/src; see Makefile header for 'cloned')"; \
+					echo "Modules found: $$cloned"; \
+					echo "Hint: run 'make modules-update $$r' or clone into modules/$$r/src"; \
 					exit 1; \
 				fi; \
 			done; \
@@ -210,8 +211,12 @@ build:
 # upstream. This target just dispatches via sub-make.
 #
 # Requires every cloned module to expose a `setup` target in its src
-# Makefile (true for redisjson out of the box; added to redisbloom and
-# redistimeseries in our forks; pending for redisearch).
+# Makefile (true for redisjson out of the box; added to redisbloom,
+# redistimeseries, and redisearch in our forks).
+#
+# A module counts as "cloned" for setup/build/run/test if either
+#   modules/<name>/src/.prepared exists (written by `make modules-update`), or
+#   modules/<name>/src/.git exists (file or dir — supports manual clones and git worktrees).
 #
 # Module selection (matches build/run/test):
 #   (no args) | all | . | '*'   every cloned module under modules/<name>/src
@@ -225,8 +230,9 @@ setup:
 	@requested="$(SETUP_ARGS)"; \
 	cloned=""; \
 	for name in $(AVAILABLE_MODULES); do \
-		[ -f "modules/$$name/src/.prepared" ] || continue; \
-		cloned="$$cloned $$name"; \
+		if [ -f "modules/$$name/src/.prepared" ] || [ -e "modules/$$name/src/.git" ]; then \
+			cloned="$$cloned $$name"; \
+		fi; \
 	done; \
 	cloned=$$(echo $$cloned); \
 	case "$$requested" in \
@@ -239,17 +245,18 @@ setup:
 				found=""; \
 				for c in $$cloned; do [ "$$c" = "$$r" ] && found=1; done; \
 				if [ -z "$$found" ]; then \
-					echo "ERROR: module '$$r' is not cloned under modules/$$r/src"; \
-					echo "Cloned modules: $$cloned"; \
-					echo "Hint: run 'make modules-update $$r' first"; \
+					echo "ERROR: module '$$r' is not available under modules/$$r/src"; \
+					echo "  (expect .git or .prepared; worktrees count as .git file)"; \
+					echo "Modules found: $$cloned"; \
+					echo "Hint: run 'make modules-update $$r' or ensure a git checkout at modules/$$r/src"; \
 					exit 1; \
 				fi; \
 			done; \
 			selected="$$requested" ;; \
 	esac; \
 	if [ -z "$$selected" ]; then \
-		echo "ERROR: no cloned modules to set up"; \
-		echo "       run 'make modules-update all' first"; \
+		echo "ERROR: no modules to set up (no modules/*/src with .git or .prepared)"; \
+		echo "       run 'make modules-update all' or clone into modules/<name>/src"; \
 		exit 1; \
 	fi; \
 	echo "==> Setting up: $$selected"; \
@@ -318,8 +325,9 @@ run:
 	requested="$(RUN_ARGS)"; \
 	cloned=""; \
 	for name in $(AVAILABLE_MODULES); do \
-		[ -f "modules/$$name/src/.prepared" ] || continue; \
-		cloned="$$cloned $$name"; \
+		if [ -f "modules/$$name/src/.prepared" ] || [ -e "modules/$$name/src/.git" ]; then \
+			cloned="$$cloned $$name"; \
+		fi; \
 	done; \
 	cloned=$$(echo $$cloned); \
 	case "$$requested" in \
@@ -333,8 +341,8 @@ run:
 				found=""; \
 				for c in $$cloned; do [ "$$c" = "$$r" ] && found=1; done; \
 				if [ -z "$$found" ]; then \
-					echo "ERROR: module '$$r' is not cloned under modules/$$r/src"; \
-					echo "Cloned modules: $$cloned"; \
+					echo "ERROR: module '$$r' is not available under modules/$$r/src (.git or .prepared)"; \
+					echo "Modules found: $$cloned"; \
 					exit 1; \
 				fi; \
 			done; \
@@ -404,8 +412,9 @@ test:
 	target="$$1"; shift; \
 	cloned=""; \
 	for name in $(AVAILABLE_MODULES); do \
-		[ -f "modules/$$name/src/.prepared" ] || continue; \
-		cloned="$$cloned $$name"; \
+		if [ -f "modules/$$name/src/.prepared" ] || [ -e "modules/$$name/src/.git" ]; then \
+			cloned="$$cloned $$name"; \
+		fi; \
 	done; \
 	cloned=$$(echo $$cloned); \
 	case "$$target" in \
