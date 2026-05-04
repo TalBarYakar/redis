@@ -52,7 +52,7 @@ jobs:
           fetch-depth: 0
 
       - name: Create tarball
-        run: ./utils/releasetools/01_create_tarball.sh "$TAG_NAME"
+        run: make release-tarball TAG="$TAG_NAME"
 
       - name: Verify tarball size
         id: size
@@ -61,8 +61,12 @@ jobs:
           SIZE_MB=$(du -m "$TARBALL" | cut -f1)
           echo "Tarball size: ${SIZE_MB} MB"
           echo "size_mb=${SIZE_MB}" >> $GITHUB_OUTPUT
-          if [ "$SIZE_MB" -lt 3 ] || [ "$SIZE_MB" -gt 5 ]; then
-            echo "::warning::Tarball size ${SIZE_MB} MB is outside expected range (3-5 MB)"
+          # Bundled modules + Redis core are much larger than legacy core-only archives (~3–5 MB).
+          if [ "$SIZE_MB" -lt 20 ]; then
+            echo "::warning::Tarball size ${SIZE_MB} MB is unexpectedly small for redis+modules source bundle"
+            echo "size_warning=true" >> $GITHUB_OUTPUT
+          elif [ "$SIZE_MB" -gt 8000 ]; then
+            echo "::warning::Tarball size ${SIZE_MB} MB is unexpectedly large"
             echo "size_warning=true" >> $GITHUB_OUTPUT
           else
             echo "size_warning=false" >> $GITHUB_OUTPUT

@@ -665,6 +665,19 @@ modules-unshallow:
 	done
 
 # ----------------------------------------------------------------------------
+# `make modules-update-all`
+#
+# Runs `make modules-update all` with setup skipped (see MODULES_UPDATE_SKIP_SETUP).
+# Used as a prerequisite of `release-tarball` so every modules.yaml pin is
+# fetchable before spending time on the staging clone + tar. The tarball still
+# populates its own clean tree from the manifest; this does not copy your
+# local modules/ into the archive.
+# ----------------------------------------------------------------------------
+.PHONY: modules-update-all
+modules-update-all:
+	$(MAKE) --no-print-directory modules-update all MODULES_UPDATE_SKIP_SETUP=1
+
+# ----------------------------------------------------------------------------
 # `make release-tarball TAG=<tag> [STAGING_DIR=<dir>] [OUT_PATH=<path>] [TAR=<gnu-tar>]`
 #
 # Build a self-contained, reproducible source release tarball:
@@ -692,10 +705,18 @@ modules-unshallow:
 # commit timestamp, owner/group fixed to 0. Two runs from the same TAG
 # produce byte-identical tarballs (assuming upstream module SHAs are
 # unchanged).
+#
+# Prerequisite: `modules-update-all` (validates modules.yaml; use
+#   make release-tarball TAG=... RELEASE_TARBALL_SKIP_MODULES_UPDATE=1
+# to skip if you only want the tar without a local modules refresh).
 # ----------------------------------------------------------------------------
 TAR ?= $(shell command -v gtar 2>/dev/null || command -v tar 2>/dev/null)
 
+ifeq ($(RELEASE_TARBALL_SKIP_MODULES_UPDATE),1)
 release-tarball:
+else
+release-tarball: modules-update-all
+endif
 	@if [ -z "$(TAG)" ]; then \
 		echo "ERROR: TAG=<tag> is required"; \
 		echo "       e.g. 'make release-tarball TAG=8.0.0'"; \
@@ -774,8 +795,8 @@ release-tarball:
 	echo; \
 	echo "==> Tarball ready: $$out"; \
 	size=$$(du -h "$$out" | awk '{print $$1}'); \
-	sha=$$(shasum -a 256 "$$out" | awk '{print $$1}'); \
+	sha=$$(if command -v sha256sum >/dev/null 2>&1; then sha256sum "$$out" | awk '{print $$1}'; elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$$out" | awk '{print $$1}'; else openssl dgst -sha256 "$$out" | awk '{print $$NF}'; fi); \
 	echo "    size:    $$size"; \
 	echo "    sha256:  $$sha"
 
-.PHONY: install build run test setup modules modules-update modules-unshallow sync-redis-conf release-tarball
+.PHONY: install build run test setup modules modules-update modules-update-all modules-unshallow sync-redis-conf release-tarball
