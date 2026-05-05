@@ -227,9 +227,12 @@ build:
 # NOT triggered automatically by `build` — invoke once on a fresh checkout.
 # ----------------------------------------------------------------------------
 setup:
-	@if [ "$$(uname -s)" = "Linux" ] && [ "$$(id -u)" -eq 0 ] && command -v apt-get >/dev/null 2>&1 \
-	    && ! command -v sudo >/dev/null 2>&1; then \
-		apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends sudo python3; \
+	@if [ "$$(uname -s)" = "Linux" ] && [ "$$(id -u)" -eq 0 ] && ! command -v sudo >/dev/null 2>&1; then \
+		if command -v apt-get >/dev/null 2>&1; then \
+			apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends sudo python3; \
+		elif command -v dnf >/dev/null 2>&1; then \
+			dnf install -y sudo python3; \
+		fi; \
 	fi; \
 	requested="$(SETUP_ARGS)"; \
 	cloned=""; \
