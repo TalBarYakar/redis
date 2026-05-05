@@ -43,7 +43,7 @@ modules:
     loadmodule: ./modules/redisearch/redisearch.so
   - name: redisjson
     repo: https://github.com/redisjson/redisjson
-    version: tal.ba/feat/make_set_up
+    version: tal.ba/feat/make_setup_new
     commit:
     loadmodule: ./modules/redisjson/rejson.so
   - name: redistimeseries
