@@ -227,7 +227,11 @@ build:
 # NOT triggered automatically by `build` — invoke once on a fresh checkout.
 # ----------------------------------------------------------------------------
 setup:
-	@requested="$(SETUP_ARGS)"; \
+	@if [ "$$(uname -s)" = "Linux" ] && [ "$$(id -u)" -eq 0 ] && command -v apt-get >/dev/null 2>&1 \
+	    && ! command -v sudo >/dev/null 2>&1; then \
+		apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends sudo python3; \
+	fi; \
+	requested="$(SETUP_ARGS)"; \
 	cloned=""; \
 	for name in $(AVAILABLE_MODULES); do \
 		if [ -f "modules/$$name/src/.prepared" ] || [ -e "modules/$$name/src/.git" ]; then \
