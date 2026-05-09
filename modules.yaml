@@ -48,6 +48,6 @@ modules:
     loadmodule: ./modules/redisjson/rejson.so
   - name: redistimeseries
     repo: https://github.com/redistimeseries/redistimeseries
-    version: tal.ba/feat/make_setup
+    version: tal.ba/feat/make_setup_new
     commit:
     loadmodule: ./modules/redistimeseries/redistimeseries.so
