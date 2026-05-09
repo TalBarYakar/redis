@@ -808,8 +808,9 @@ tarball:
 		mkdir -p "$$work/modules/redisearch/src/.git"; \
 	fi; \
 	echo; \
-	echo "==> Generating redis-gen.conf in staging (all manifest modules)"; \
-	$(MAKE) -C "$$work" --no-print-directory sync-redis-conf; \
+	echo "==> Generating redis-gen.conf in staging (all manifest modules, ASSUME_BUILT=1)"; \
+	cp modules/sync-redis-conf.mk "$$work/modules/sync-redis-conf.mk"; \
+	$(MAKE) -C "$$work" --no-print-directory sync-redis-conf ASSUME_BUILT=1; \
 	echo "==> Promoting redis-gen.conf -> redis.conf, removing redis-gen.conf"; \
 	mv "$$work/redis-gen.conf" "$$work/redis.conf"; \
 	echo; \

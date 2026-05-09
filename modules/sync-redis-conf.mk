@@ -49,6 +49,15 @@ REDIS_GEN_CONF ?= redis-gen.conf
 # caller's intent for that invocation.
 MODULES ?=
 
+# ASSUME_BUILT — when 1, emit active `loadmodule <so>` lines for every
+# requested module regardless of whether the .so currently exists on disk,
+# and inline module.conf if present. Used by `make tarball`, where modules
+# are cloned but not yet built at staging time, but will be built by the
+# consumer before they ever run redis-server. Without this flag (the
+# default), modules whose .so is missing get commented-out placeholders so
+# `redis-server` doesn't crash on `loadmodule` of a nonexistent file.
+ASSUME_BUILT ?=
+
 sync-redis-conf:
 	@if [ ! -f "$(REDIS_CONF)" ]; then \
 		echo "ERROR: $(REDIS_CONF) not found"; exit 1; \
@@ -62,11 +71,12 @@ sync-redis-conf:
 	else \
 		default_used=0; \
 	fi; \
+	assume_built="$(strip $(ASSUME_BUILT))"; \
 	active=""; missing=""; \
 	for name in $$requested; do \
 		so=$$(awk -v want="$$name" -v field=loadmodule '$(MANIFEST_FIELD_AWK)' $(MODULES_MANIFEST_FILE)); \
 		if [ -z "$$so" ]; then continue; fi; \
-		if [ -f "$$so" ]; then active="$$active $$name"; \
+		if [ -f "$$so" ] || [ "$$assume_built" = "1" ]; then active="$$active $$name"; \
 		else missing="$$missing $$name"; fi; \
 	done; \
 	active=$$(echo $$active); missing=$$(echo $$missing); \
@@ -115,7 +125,7 @@ sync-redis-conf:
 				echo "# $$name: 'loadmodule' field missing in modules.yaml"; \
 				continue; \
 			fi; \
-			if [ -f "$$so" ]; then \
+			if [ -f "$$so" ] || [ "$$assume_built" = "1" ]; then \
 				echo "loadmodule $$so"; \
 			else \
 				echo "# $$name: not built ($$so absent — run 'make build $$name')"; \
@@ -127,7 +137,7 @@ sync-redis-conf:
 			so=$$(awk -v want="$$name" -v field=loadmodule '$(MANIFEST_FIELD_AWK)' $(MODULES_MANIFEST_FILE)); \
 			conf="modules/$$name/src/module.conf"; \
 			echo "# >>> BEGIN module: $$name <<<"; \
-			if [ -n "$$so" ] && [ -f "$$so" ]; then \
+			if [ -n "$$so" ] && { [ -f "$$so" ] || [ "$$assume_built" = "1" ]; }; then \
 				if [ -f "$$conf" ]; then \
 					cat "$$conf"; \
 				else \
