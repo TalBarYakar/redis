@@ -52,7 +52,7 @@ jobs:
           fetch-depth: 0
 
       - name: Create tarball
-        run: make release-tarball TAG="$TAG_NAME"
+        run: make tarball TAG="$TAG_NAME"
 
       - name: Verify tarball size
         id: size

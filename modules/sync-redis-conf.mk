@@ -1,98 +1,154 @@
-# modules/sync-redis-conf.mk — repo-root-only target that rewrites the
-# auto-managed modules block in redis.conf based on modules.yaml.
+# modules/sync-redis-conf.mk — repo-root-only target that (re)generates the
+# untracked redis-gen.conf file.
 #
 # This file is deliberately separate from modules/manifest.mk so that
 # modules/common.mk (which only needs the manifest *parser*) can include
 # manifest.mk without dragging the `sync-redis-conf` target into per-module
 # Make scope. Per-module builds (`make -C modules/<name>`) have no business
-# touching the repo-root redis.conf, so this target should not even be
+# touching the repo-root config files, so this target should not even be
 # visible there.
 #
 # Include order:
 #   - top-level Makefile: include modules/manifest.mk, then this file
 #   - modules/common.mk:  include modules/manifest.mk only
 #
-# Behavior:
-#   For every module listed in modules.yaml, emits either:
-#     - active `loadmodule <so>` + `include modules/<name>/src/module.conf`
-#       pair if `modules/<name>/src/.prepared` exists, or
-#     - commented-out placeholders otherwise.
+# Output: $(REDIS_GEN_CONF) (default: redis-gen.conf at the repo root). Always
+# rewritten in full.
 #
-#   Block boundaries are the markers
-#     "# >>> BEGIN auto-managed modules section <<<"
-#     "# <<< END auto-managed modules section <<<"
-#   in redis.conf. Anything outside the markers is preserved as-is.
+# Layout of the generated file (two clearly-marked sections):
 #
-# Usually invoked automatically by `make modules-update`; can also be run
-# standalone after manually adding/removing `modules/<name>/src/.prepared`.
+#   1. Redis-core config — verbatim copy of $(REDIS_CONF) (default redis.conf)
+#      with that file's `# >>> BEGIN auto-managed modules section <<<` ...
+#      `# <<< END … <<<` block elided. Edit redis.conf to change Redis-core
+#      defaults; the next sync picks them up.
 #
-# REDIS_CONF defaults to `redis.conf` (relative to the current working
-# directory, matching the convention used by every other path in our
-# Makefile — invoke from the repo root).
+#   2. Modules — for every module in modules.yaml:
+#        - if its .so artifact (manifest's `loadmodule` field) is present,
+#          emit an active `loadmodule <so>` line and inline the contents of
+#          modules/<name>/src/module.conf;
+#        - otherwise, emit a commented placeholder and DO NOT inline
+#          module.conf (those directives would break redis-server when the
+#          module isn't loaded).
+#
+# Same logic regardless of whether sync-redis-conf is invoked by
+# `modules-install` (typically: no .so files yet → all modules commented),
+# `build` (typically: requested modules now loadable), or by hand. The
+# generated file always reflects the current state of the workspace.
 #
 # Requires manifest.mk to have been included first (uses AVAILABLE_MODULES,
 # MANIFEST_FIELD_AWK, MODULES_MANIFEST_FILE).
 
-REDIS_CONF ?= redis.conf
+REDIS_CONF     ?= redis.conf
+REDIS_GEN_CONF ?= redis-gen.conf
+
+# MODULES — explicit list of modules to include in redis-gen.conf's Modules
+# section. When unset/empty, defaults to every module in modules.yaml. Pass
+# from a calling target via $(MAKE) sync-redis-conf MODULES="<names>".
+# Unrequested modules are omitted from redis-gen.conf entirely (they don't
+# even appear as commented placeholders), so the file always reflects the
+# caller's intent for that invocation.
+MODULES ?=
 
 sync-redis-conf:
 	@if [ ! -f "$(REDIS_CONF)" ]; then \
 		echo "ERROR: $(REDIS_CONF) not found"; exit 1; \
 	fi; \
-	if ! grep -q '^# >>> BEGIN auto-managed modules section <<<$$' "$(REDIS_CONF)"; then \
-		echo "ERROR: BEGIN marker not found in $(REDIS_CONF)"; \
-		echo "       Expected line: '# >>> BEGIN auto-managed modules section <<<'"; \
-		exit 1; \
+	src=$(REDIS_CONF); \
+	gen=$(REDIS_GEN_CONF); \
+	requested="$(strip $(MODULES))"; \
+	if [ -z "$$requested" ]; then \
+		requested="$(AVAILABLE_MODULES)"; \
+		default_used=1; \
+	else \
+		default_used=0; \
 	fi; \
-	if ! grep -q '^# <<< END auto-managed modules section <<<$$' "$(REDIS_CONF)"; then \
-		echo "ERROR: END marker not found in $(REDIS_CONF)"; \
-		echo "       Expected line: '# <<< END auto-managed modules section <<<'"; \
-		exit 1; \
-	fi; \
-	block=$$(mktemp -t redis-conf-block.XXXXXX); \
-	trap 'rm -f "$$block" "$(REDIS_CONF).tmp"' EXIT; \
+	active=""; missing=""; \
+	for name in $$requested; do \
+		so=$$(awk -v want="$$name" -v field=loadmodule '$(MANIFEST_FIELD_AWK)' $(MODULES_MANIFEST_FILE)); \
+		if [ -z "$$so" ]; then continue; fi; \
+		if [ -f "$$so" ]; then active="$$active $$name"; \
+		else missing="$$missing $$name"; fi; \
+	done; \
+	active=$$(echo $$active); missing=$$(echo $$missing); \
 	{ \
-		echo "# (Anything between this and the matching END marker is rewritten by"; \
-		echo "#  \`make modules-update\`. Edits inside this block will be lost.)"; \
+		echo "# ============================================================================="; \
+		echo "# redis-gen.conf — auto-generated by \`make sync-redis-conf\`"; \
+		echo "# ============================================================================="; \
+		echo "#"; \
+		echo "# Untracked, regenerated whenever \`make modules-install\` or \`make build\`"; \
+		echo "# runs (both call \`sync-redis-conf\` at the end). Two sections:"; \
+		echo "#"; \
+		echo "#   1. Redis-core config — verbatim copy of $$src (auto-managed modules"; \
+		echo "#      block elided). Edit $$src to change Redis-core defaults; the next"; \
+		echo "#      sync picks them up."; \
+		echo "#   2. Modules — only the modules requested by the caller (via the"; \
+		echo "#      MODULES variable; defaults to all manifest modules when invoked"; \
+		echo "#      standalone). Each requested module appears as an active"; \
+		echo "#      \`loadmodule\` + inlined module.conf if its .so is present, or as"; \
+		echo "#      a commented placeholder otherwise. Modules not in the request"; \
+		echo "#      list are omitted entirely."; \
+		echo "#"; \
+		echo "# Do NOT edit redis-gen.conf — your edits will be overwritten."; \
+		echo "#"; \
+		printf "# Generated:   %s\n" "$$(date -u +'%Y-%m-%dT%H:%M:%SZ')"; \
+		if [ "$$default_used" = "1" ]; then \
+			printf "# Requested:   %s\n" "<all manifest modules>"; \
+		else \
+			printf "# Requested:   %s\n" "$$requested"; \
+		fi; \
+		printf "# Active:      %s\n" "$${active:-<none>}"; \
+		printf "# Missing .so: %s\n" "$${missing:-<none>}"; \
+		echo "# ============================================================================="; \
 		echo; \
-		first=1; \
-		for name in $(AVAILABLE_MODULES); do \
+		echo "# >>> BEGIN section: Redis-core config (sourced from $$src) <<<"; \
+		echo; \
+		awk '/^# >>> BEGIN auto-managed modules section <<<$$/ { skip=1; next } \
+		     /^# <<< END auto-managed modules section <<<$$/ { skip=0; next } \
+		     !skip { print }' "$$src"; \
+		echo "# <<< END section: Redis-core config <<<"; \
+		echo; \
+		echo "# >>> BEGIN section: Modules (regenerated on every sync) <<<"; \
+		echo; \
+		for name in $$requested; do \
 			so=$$(awk -v want="$$name" -v field=loadmodule '$(MANIFEST_FIELD_AWK)' $(MODULES_MANIFEST_FILE)); \
 			if [ -z "$$so" ]; then \
-				echo "WARNING: 'loadmodule' field missing for '$$name' in modules.yaml" >&2; \
+				echo "# $$name: 'loadmodule' field missing in modules.yaml"; \
 				continue; \
 			fi; \
-			[ "$$first" = "1" ] || echo; \
-			first=0; \
 			if [ -f "$$so" ]; then \
 				echo "loadmodule $$so"; \
-				echo "include modules/$$name/src/module.conf"; \
 			else \
-				echo "# $$name .so not built at $$so (run 'make build $$name' to enable)"; \
+				echo "# $$name: not built ($$so absent — run 'make build $$name')"; \
 				echo "# loadmodule $$so"; \
-				echo "# include modules/$$name/src/module.conf"; \
 			fi; \
 		done; \
 		echo; \
-	} > "$$block"; \
-	awk -v block="$$block" '\
-		/^# >>> BEGIN auto-managed modules section <<<$$/ { \
-			print; \
-			while ((getline line < block) > 0) print line; \
-			skip=1; next; \
-		} \
-		/^# <<< END auto-managed modules section <<<$$/ { skip=0 } \
-		!skip { print } \
-	' "$(REDIS_CONF)" > "$(REDIS_CONF).tmp"; \
-	mv "$(REDIS_CONF).tmp" "$(REDIS_CONF)"; \
-	built=""; not_built=""; \
-	for name in $(AVAILABLE_MODULES); do \
-		so=$$(awk -v want="$$name" -v field=loadmodule '$(MANIFEST_FIELD_AWK)' $(MODULES_MANIFEST_FILE)); \
-		if [ -n "$$so" ] && [ -f "$$so" ]; then built="$$built $$name"; \
-		else not_built="$$not_built $$name"; fi; \
-	done; \
-	built=$$(echo $$built); not_built=$$(echo $$not_built); \
-	echo "    enabled in $(REDIS_CONF): $${built:-<none>}"; \
-	echo "    commented out:           $${not_built:-<none>}"
+		for name in $$requested; do \
+			so=$$(awk -v want="$$name" -v field=loadmodule '$(MANIFEST_FIELD_AWK)' $(MODULES_MANIFEST_FILE)); \
+			conf="modules/$$name/src/module.conf"; \
+			echo "# >>> BEGIN module: $$name <<<"; \
+			if [ -n "$$so" ] && [ -f "$$so" ]; then \
+				if [ -f "$$conf" ]; then \
+					cat "$$conf"; \
+				else \
+					echo "# (no $$conf found)"; \
+				fi; \
+			else \
+				echo "# (module not built — directives elided so redis-server won't"; \
+				echo "#  reject unknown config; run 'make build $$name' to enable)"; \
+			fi; \
+			echo "# <<< END module: $$name <<<"; \
+			echo; \
+		done; \
+		echo "# <<< END section: Modules <<<"; \
+	} > "$$gen"; \
+	echo "==> Wrote $$gen"; \
+	if [ "$$default_used" = "1" ]; then \
+		echo "    requested:   <all manifest modules>"; \
+	else \
+		echo "    requested:   $$requested"; \
+	fi; \
+	echo "    active:      $${active:-<none>}"; \
+	echo "    missing .so: $${missing:-<none>}"
 
 .PHONY: sync-redis-conf
