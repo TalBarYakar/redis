@@ -1,0 +1,33 @@
+# OSNICK=mariner2 — CBL-Mariner 2 Redis build environment.
+# README does not document Mariner; install_script.sh handles every dep
+# via the abstract->tdnf package map. The base image is minimal (no awk),
+# so we install awk first; the install script also tdnf-install-bootstraps
+# awk if missing, but doing it here keeps the layering deterministic.
+FROM mcr.microsoft.com/cbl-mariner/base/core:2.0
+
+WORKDIR /workspace
+ENV OSNICK=mariner2
+
+RUN tdnf -y install bash gawk tar git ca-certificates && \
+    tdnf clean all
+
+COPY modules /workspace/modules
+RUN failed=""; \
+    for name in redistimeseries redisbloom redisjson redisearch; do \
+        script="/workspace/modules/$name/src/.install/install_script.sh"; \
+        if [ -x "$script" ]; then \
+            echo "==> [$name] install_script.sh (OSNICK=$OSNICK)"; \
+            if ! (cd "/workspace/modules/$name/src/.install" && bash install_script.sh); then \
+                echo "==> [$name] WARNING: install_script.sh failed (continuing)"; \
+                failed="$failed $name"; \
+            fi; \
+        else \
+            echo "==> [$name] not cloned, skipping"; \
+        fi; \
+    done; \
+    if [ -n "$failed" ]; then \
+        echo "==> WARNING: module installer(s) failed:$failed"; \
+        echo "==> Image still tagged; affected modules will need their deps installed at runtime."; \
+    else \
+        echo "==> All available module installers completed."; \
+    fi

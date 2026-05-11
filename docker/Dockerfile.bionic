@@ -1,0 +1,47 @@
+# OSNICK=bionic — Ubuntu 18.04 Redis build environment.
+# Extrapolated from docker/Dockerfile.focal. README's earliest documented
+# Ubuntu is 20.04, so this Dockerfile keeps the same package list but
+# without the gcc-10 update-alternatives step (bionic's gcc-7 is too old
+# for some C11 features the modules need; module install_script.sh's
+# `quirks/bionic.sh` adds the toolchain PPA + gcc-10 properly).
+FROM ubuntu:18.04
+
+WORKDIR /workspace
+ENV OSNICK=bionic
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN printf 'Acquire::Retries "3";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' \
+    > /etc/apt/apt.conf.d/80-retries
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates wget dpkg-dev gcc g++ libc6-dev libssl-dev make git \
+        python3 python3-pip python3-venv python3-dev \
+        unzip rsync clang automake autoconf libtool pkg-config && \
+    pip3 install cmake==3.31.6 && \
+    ln -sf /usr/local/bin/cmake /usr/bin/cmake && \
+    rm -rf /var/lib/apt/lists/*
+
+# Module deps — bionic's quirks script (modules/<name>/src/.install/quirks/
+# bionic.sh) installs the gcc-10 toolchain and any other bionic-specific
+# fixups before the abstract install proceeds.
+COPY modules /workspace/modules
+RUN failed=""; \
+    for name in redistimeseries redisbloom redisjson redisearch; do \
+        script="/workspace/modules/$name/src/.install/install_script.sh"; \
+        if [ -x "$script" ]; then \
+            echo "==> [$name] install_script.sh (OSNICK=$OSNICK)"; \
+            if ! (cd "/workspace/modules/$name/src/.install" && bash install_script.sh); then \
+                echo "==> [$name] WARNING: install_script.sh failed (continuing)"; \
+                failed="$failed $name"; \
+            fi; \
+        else \
+            echo "==> [$name] not cloned, skipping"; \
+        fi; \
+    done; \
+    if [ -n "$failed" ]; then \
+        echo "==> WARNING: module installer(s) failed:$failed"; \
+        echo "==> Image still tagged; affected modules will need their deps installed at runtime."; \
+    else \
+        echo "==> All available module installers completed."; \
+    fi

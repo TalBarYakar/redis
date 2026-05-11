@@ -11,7 +11,7 @@ endif
 default: all
 
 # ----------------------------------------------------------------------------
-# `make modules-install [<name> ...]`
+# `make modules-update [<name> ...]`
 #
 # Idempotent: if the module is not yet cloned at modules/<name>/src/, clones
 # it at the pinned ref. If it is already cloned, fast-forwards/checks-out
@@ -27,7 +27,7 @@ default: all
 # selected. `all`, `.`, or '*' (quote the star) are explicit synonyms.
 #
 # Clones with full history by default so tools like Git Graph / `git log`
-# work as expected. Pass MODULES_INSTALL_SHALLOW=1 to clone with `--depth 1`
+# work as expected. Pass MODULES_UPDATE_SHALLOW=1 to clone with `--depth 1`
 # — used internally by `tarball` to avoid downloading history that's
 # never shipped. To shrink an already-installed full clone back to shallow,
 # use `make modules-shallow <name>`.
@@ -59,7 +59,7 @@ include modules/sync-redis-conf.mk
 # Adding a new positional-arg goal? Append it to GOALS_WITH_ARGS. No copy/paste.
 # ----------------------------------------------------------------------------
 GOALS_WITH_ARGS := \
-    modules-install:MODULES_ARGS \
+    modules-update:MODULES_ARGS \
     modules-shallow:SHALLOW_ARGS \
     run:RUN_ARGS \
     build:BUILD_ARGS \
@@ -98,7 +98,7 @@ endif
 
 # `sync-redis-conf <name> ...` glue: feed the positional args into the
 # canonical MODULES variable that modules/sync-redis-conf.mk's recipe reads.
-# (When the same target is invoked recursively from `build`/`modules-install`
+# (When the same target is invoked recursively from `build`/`modules-update`
 # as `$(MAKE) sync-redis-conf MODULES="..."`, MAKECMDGOALS in the child make
 # is just `sync-redis-conf` with no positional args, so SYNC_ARGS is empty
 # and the explicitly-passed MODULES wins.)
@@ -135,8 +135,10 @@ install:
 #      so each module compiles against the exact RedisModule API it will be
 #      dlopen()'d into, and so any test harness run from the module points at
 #      our build of redis-server.
-#      Fail-fast on the first module that fails.
-#   3. After a successful build, print the .so path(s) discovered per module.
+#      All selected modules are attempted even if one fails; a summary of
+#      failures is printed at the end and `make build` exits non-zero if any
+#      module failed.
+#   3. After the build, print the .so path(s) discovered per module.
 #
 # If no modules have been cloned yet, only the main Redis is built.
 # ----------------------------------------------------------------------------
@@ -164,12 +166,13 @@ build:
 					echo "ERROR: module '$$r' is not available under modules/$$r/src"; \
 					echo "  (expect .git or .prepared in modules/$$r/src; see Makefile header for 'cloned')"; \
 					echo "Modules found: $$cloned"; \
-					echo "Hint: run 'make modules-install $$r' or clone into modules/$$r/src"; \
+					echo "Hint: run 'make modules-update $$r' or clone into modules/$$r/src"; \
 					exit 1; \
 				fi; \
 			done; \
 			modules="$$requested" ;; \
 	esac; \
+	failed=""; \
 	echo "==> Building main Redis (src/)"; \
 	$(MAKE) -C src all; \
 	if [ -z "$$modules" ]; then \
@@ -183,7 +186,6 @@ build:
 		echo; \
 		echo "==> Building modules against $(CURDIR)/src (RM_INCLUDE_DIR) and $(CURDIR)/src/redis-server:"; \
 		echo "   $$modules"; \
-		failed=""; \
 		for name in $$modules; do \
 			echo; \
 			echo "==> [module] $$name (modules/$$name)"; \
@@ -192,13 +194,12 @@ build:
 				RS_INCLUDE_DIR="$(CURDIR)/src" \
 				REDIS_SERVER="$(CURDIR)/src/redis-server"; then \
 				failed="$$failed $$name"; \
-				break; \
+				echo "==> [module] $$name: FAILED (continuing with remaining modules)"; \
 			fi; \
 		done; \
 		if [ -n "$$failed" ]; then \
 			echo; \
-			echo "ERROR: module build failed:$$failed"; \
-			exit 1; \
+			echo "==> WARNING: The following module(s) failed to build:$${failed}"; \
 		fi; \
 	fi; \
 	echo; \
@@ -222,7 +223,12 @@ build:
 	fi; \
 	echo; \
 	echo "==> Refreshing redis-gen.conf via sync-redis-conf"; \
-	$(MAKE) --no-print-directory sync-redis-conf MODULES="$$modules"
+	$(MAKE) --no-print-directory sync-redis-conf MODULES="$$modules"; \
+	if [ -n "$$failed" ]; then \
+		echo; \
+		echo "ERROR: make build finished with module failure(s):$${failed}"; \
+		exit 1; \
+	fi
 
 # ----------------------------------------------------------------------------
 # `make bootstrap [<name> ...|all|.|'*']`
@@ -239,7 +245,7 @@ build:
 # and redisearch).
 #
 # A module counts as "cloned" for bootstrap/build/run/test if either
-#   modules/<name>/src/.prepared exists (written by `make modules-install`), or
+#   modules/<name>/src/.prepared exists (written by `make modules-update`), or
 #   modules/<name>/src/.git exists (file or dir — supports manual clones and git worktrees).
 #
 # Module selection (matches build/run/test):
@@ -279,7 +285,7 @@ bootstrap:
 					echo "ERROR: module '$$r' is not available under modules/$$r/src"; \
 					echo "  (expect .git or .prepared; worktrees count as .git file)"; \
 					echo "Modules found: $$cloned"; \
-					echo "Hint: run 'make modules-install $$r' or ensure a git checkout at modules/$$r/src"; \
+					echo "Hint: run 'make modules-update $$r' or ensure a git checkout at modules/$$r/src"; \
 					exit 1; \
 				fi; \
 			done; \
@@ -287,7 +293,7 @@ bootstrap:
 	esac; \
 	if [ -z "$$selected" ]; then \
 		echo "ERROR: no modules to bootstrap (no modules/*/src with .git or .prepared)"; \
-		echo "       run 'make modules-install all' or clone into modules/<name>/src"; \
+		echo "       run 'make modules-update all' or clone into modules/<name>/src"; \
 		exit 1; \
 	fi; \
 	echo "==> Bootstrapping: $$selected"; \
@@ -299,7 +305,7 @@ bootstrap:
 		src_mk="modules/$$name/src/Makefile"; \
 		if [ ! -f "$$src_mk" ]; then \
 			echo "    !! SKIP: $$src_mk does not exist"; \
-			echo "       (the upstream clone may be incomplete; try 'make modules-install $$name')"; \
+			echo "       (the upstream clone may be incomplete; try 'make modules-update $$name')"; \
 			failed="$$failed $$name"; \
 			continue; \
 		fi; \
@@ -330,14 +336,14 @@ bootstrap:
 # `make setup [<name> ...]`
 #
 # Convenience wrapper for a fresh checkout: clone/refresh the requested
-# modules (`modules-install`) and install their build/test prereqs
+# modules (`modules-update`) and install their build/test prereqs
 # (`bootstrap`) in one step. After `make setup` you can go straight to
 # `make build` / `make test` / `make run`.
 #
-# Module selection follows `modules-install` conventions: with no args,
+# Module selection follows `modules-update` conventions: with no args,
 # every module listed in modules.yaml is selected. `all`, `.`, or '*'
 # (quote the star) are explicit synonyms.
-# Forwarding flags: pass `MODULES_INSTALL_SHALLOW=1` to clone shallow.
+# Forwarding flags: pass `MODULES_UPDATE_SHALLOW=1` to clone shallow.
 # ----------------------------------------------------------------------------
 setup:
 	@requested="$(SETUP_ARGS)"; \
@@ -345,8 +351,8 @@ setup:
 		echo "==> No module specified — defaulting to all ($(AVAILABLE_MODULES))"; \
 		requested="$(AVAILABLE_MODULES)"; \
 	fi; \
-	echo "==> [setup] Step 1/2: modules-install $$requested"; \
-	$(MAKE) --no-print-directory modules-install $$requested; \
+	echo "==> [setup] Step 1/2: modules-update $$requested"; \
+	$(MAKE) --no-print-directory modules-update $$requested; \
 	echo; \
 	echo "==> [setup] Step 2/2: bootstrap $$requested"; \
 	$(MAKE) --no-print-directory bootstrap $$requested
@@ -367,6 +373,14 @@ setup:
 # works on any OS/arch without hardcoded `linux-x64-release` etc. Release
 # builds are preferred over debug; paths under CMakeFiles/ and known test
 # dirs are excluded.
+#
+# When the same source tree is volume-mounted into containers of different
+# OSes, modules/<name>/src/bin ends up holding multiple `<os>-<arch>-release/`
+# trees side-by-side (e.g. host macOS leftovers + container Linux output).
+# Loading the wrong one yields "invalid ELF header" / "wrong-type Mach-O".
+# To avoid that, the .so search prefers `<host_os>-<arch>-release/` for
+# the *current* host first (uname -s, mapped Darwin → macos), then falls
+# back to plain `release/`, then to any `<...>-release/`.
 #
 # Extra server flags/config pass via ARGS:
 #   make run ARGS="--port 6400 --daemonize no"
@@ -414,9 +428,13 @@ run:
 		fi; \
 		[ -z "$$so_base" ] && so_base="$$name.so"; \
 		name_dir="modules/$$name"; \
+		host_os=$$(uname -s | tr '[:upper:]' '[:lower:]'); \
+		[ "$$host_os" = "darwin" ] && host_os="macos"; \
 		candidates=$$(find "$$name_dir" -type f -name "$$so_base" 2>/dev/null \
 			| grep -v -E '/(CMakeFiles|tests?|sample|samples|fixtures)/' || true); \
-		so_path=$$(echo "$$candidates" | grep -E '(^|/)(release|[^/]*-release)(/|$$)' | head -1); \
+		so_path=$$(echo "$$candidates" | grep -E "(^|/)$$host_os-[^/]*-release(/|$$)" | head -1); \
+		[ -z "$$so_path" ] && so_path=$$(echo "$$candidates" | grep -E '(^|/)release(/|$$)' | head -1); \
+		[ -z "$$so_path" ] && so_path=$$(echo "$$candidates" | grep -E '(^|/)[^/]*-release(/|$$)' | head -1); \
 		[ -z "$$so_path" ] && so_path=$$(echo "$$candidates" | head -1); \
 		if [ -z "$$so_path" ]; then \
 			echo "WARNING: no built $$so_base found under $$name_dir, skipping $$name (did you run 'make build'?)"; \
@@ -491,7 +509,7 @@ test:
 			fi; \
 			if [ -z "$$cloned" ]; then \
 				echo "ERROR: no cloned modules under modules/*/src"; \
-				echo "       run 'make modules-install all' and 'make build' first"; \
+				echo "       run 'make modules-update all' and 'make build' first"; \
 				exit 1; \
 			fi; \
 			echo "==> Running tests for all cloned modules: $$cloned"; \
@@ -499,7 +517,8 @@ test:
 			for name in $$cloned; do \
 				echo; \
 				echo "==> [test] $$name (modules/$$name/src)"; \
-				if ! $(MAKE) -C "modules/$$name/src" test; then \
+				if ! $(MAKE) -C "modules/$$name/src" test \
+					REDIS_SERVER="$(CURDIR)/src/redis-server"; then \
 					failed="$$failed $$name"; \
 				fi; \
 			done; \
@@ -538,15 +557,17 @@ test:
 			fi; \
 			if [ -z "$$tname" ]; then \
 				echo "==> Running all tests for module '$$target'"; \
-				exec $(MAKE) -C "modules/$$target/src" test; \
+				exec $(MAKE) -C "modules/$$target/src" test \
+					REDIS_SERVER="$(CURDIR)/src/redis-server"; \
 			else \
 				echo "==> Running test '$$tname' for module '$$target' (TEST=$$tname)"; \
-				exec $(MAKE) -C "modules/$$target/src" test TEST="$$tname"; \
+				exec $(MAKE) -C "modules/$$target/src" test TEST="$$tname" \
+					REDIS_SERVER="$(CURDIR)/src/redis-server"; \
 			fi \
 			;; \
 	esac
 
-modules-install:
+modules-update:
 	@available="$(AVAILABLE_MODULES)"; \
 	requested="$(MODULES_ARGS)"; \
 	if [ -z "$$requested" ]; then \
@@ -558,8 +579,8 @@ modules-install:
 			all|.|'*') requested="$$available"; break ;; \
 		esac; \
 	done; \
-	if [ "$(MODULES_INSTALL_SHALLOW)" = "1" ]; then \
-		echo "==> MODULES_INSTALL_SHALLOW=1: cloning with --depth 1"; \
+	if [ "$(MODULES_UPDATE_SHALLOW)" = "1" ]; then \
+		echo "==> MODULES_UPDATE_SHALLOW=1: cloning with --depth 1"; \
 		depth_args="--depth 1"; \
 	else \
 		depth_args=""; \
@@ -634,7 +655,7 @@ modules-install:
 	echo "==> Refreshing redis-gen.conf via sync-redis-conf"; \
 	$(MAKE) --no-print-directory sync-redis-conf MODULES="$$requested"; \
 	echo; \
-	echo "==> Modules installed: $$requested"; \
+	echo "==> Modules updated: $$requested"; \
 	echo "    Next: run 'make bootstrap [<name> ...]' to install per-module build/test deps."
 
 # ----------------------------------------------------------------------------
@@ -642,22 +663,22 @@ modules-install:
 # (included near the top of this Makefile). Kept out of modules/manifest.mk
 # so it isn't visible from per-module builds. Listed in this Makefile's
 # .PHONY further down so `gmake sync-redis-conf` works from the repo root
-# and so `modules-install` can invoke it via $(MAKE).
+# and so `modules-update` can invoke it via $(MAKE).
 # ----------------------------------------------------------------------------
 
 # ----------------------------------------------------------------------------
 # `make modules-shallow <name> [<name> ...]`
 #
-# Counterpart to `modules-install`: removes the existing local clone(s) and
+# Counterpart to `modules-update`: removes the existing local clone(s) and
 # re-installs them shallow (`--depth 1`). Useful for reclaiming disk after a
 # full-history install, or for CI that just needs the pinned tip.
 #
 # Implementation: rm -rf each requested module's `src/`, then delegate back
-# to `modules-install <names> MODULES_INSTALL_SHALLOW=1` so the clone logic
+# to `modules-update <names> MODULES_UPDATE_SHALLOW=1` so the clone logic
 # stays single-source-of-truth (re-shrinking an existing full clone in place
 # is fiddly and unreliable; re-cloning is robust).
 #
-# Selection follows the same conventions as `make modules-install`:
+# Selection follows the same conventions as `make modules-update`:
 #   <name> [<name> ...]   selected modules
 #   all / . / '*'         every cloned module
 # ----------------------------------------------------------------------------
@@ -682,7 +703,7 @@ modules-shallow:
 	done; \
 	if [ -z "$$cloned" ]; then \
 		echo "ERROR: no cloned modules under modules/*/src"; \
-		echo "       run 'make modules-install all' first"; \
+		echo "       run 'make modules-update all' first"; \
 		exit 1; \
 	fi; \
 	for name in $$requested; do \
@@ -697,7 +718,7 @@ modules-shallow:
 		rm -rf "modules/$$name/src"; \
 	done; \
 	echo; \
-	$(MAKE) --no-print-directory modules-install $$requested MODULES_INSTALL_SHALLOW=1
+	$(MAKE) --no-print-directory modules-update $$requested MODULES_UPDATE_SHALLOW=1
 
 # ----------------------------------------------------------------------------
 # `make tarball TAG=<tag> [STAGING_DIR=<dir>] [OUT_PATH=<path>] [TAR=<gnu-tar>]`
@@ -713,7 +734,7 @@ modules-shallow:
 #   gmake BUILD_WITH_MODULES=yes INSTALL_RUST_TOOLCHAIN=yes DISABLE_WERRORS=yes
 #   ./src/redis-server redis.conf
 # and have a working Redis + every bundled module loaded — without any git
-# fetches or `make modules-install` invocations.
+# fetches or `make modules-update` invocations.
 #
 # Inputs:
 #   TAG         (required)   git ref of Redis core to archive (e.g. 8.0.0)
@@ -728,7 +749,7 @@ modules-shallow:
 # produce byte-identical tarballs (assuming upstream module SHAs are
 # unchanged).
 #
-# Pre-step: `make modules-install all MODULES_INSTALL_SHALLOW=1` — validates
+# Pre-step: `make modules-update all MODULES_UPDATE_SHALLOW=1` — validates
 # every modules.yaml pin is fetchable before spending time on the staging
 # clone + tar. Full history would pointlessly inflate disk + bandwidth, since
 # the tarball populates its own clean tree from the manifest and never copies
@@ -740,8 +761,8 @@ TAR ?= $(shell command -v gtar 2>/dev/null || command -v tar 2>/dev/null)
 
 tarball:
 	@if [ "$(TARBALL_SKIP_MODULES_UPDATE)" != "1" ]; then \
-		echo "==> [tarball] pre-step: modules-install all (shallow)"; \
-		$(MAKE) --no-print-directory modules-install all MODULES_INSTALL_SHALLOW=1; \
+		echo "==> [tarball] pre-step: modules-update all (shallow)"; \
+		$(MAKE) --no-print-directory modules-update all MODULES_UPDATE_SHALLOW=1; \
 		echo; \
 	fi
 	@if [ -z "$(TAG)" ]; then \
@@ -832,4 +853,4 @@ tarball:
 	echo "    size:    $$size"; \
 	echo "    sha256:  $$sha"
 
-.PHONY: install build run test setup bootstrap modules-install modules-shallow sync-redis-conf tarball
+.PHONY: install build run test setup bootstrap modules-update modules-shallow sync-redis-conf tarball

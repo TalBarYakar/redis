@@ -21,11 +21,11 @@ Everywhere below, `make` means "GNU make"; substitute `gmake` on macOS.
 | `modules/manifest.mk` | Awk-in-Make parser for `modules.yaml`; included by both the top-level `Makefile` and `common.mk` (no yq/python/sh dep) |
 | `modules/<name>/Makefile` | Per-module build wrapper — declares `TARGET_MODULE` (the produced `.so` path) and `include`s `common.mk` |
 | `modules/common.mk` | Shared helpers; pulls `MODULE_REPO`/`MODULE_VERSION`/`MODULE_COMMIT` from the manifest via `manifest.mk` |
-| `modules/<name>/src/` | Checkout location — created by `make modules-install` |
+| `modules/<name>/src/` | Checkout location — created by `make modules-update` |
 | `src/redis-server` | Redis binary — produced by `make build` |
 
 Only modules listed in `modules.yaml` are considered "external" — those
-are the ones managed by `make modules-install`. In-tree modules (e.g.
+are the ones managed by `make modules-update`. In-tree modules (e.g.
 `vector-sets`) are intentionally absent from the manifest and live under
 `modules/<name>/` without a `src/` subdirectory or a manifest entry.
 
@@ -44,7 +44,7 @@ modules:
 Precedence when both are set: `commit` wins over `version`. Leave
 `commit:` empty to track the tag/branch.
 
-To bump a module: edit its entry and run `make modules-install <name>`.
+To bump a module: edit its entry and run `make modules-update <name>`.
 That's the only place pins live — the per-module `Makefile` only carries
 build-system data (`TARGET_MODULE`).
 
@@ -64,10 +64,10 @@ directory name is the manifest key.
 
 ---
 
-## 2. Clone / update: `make modules-install`
+## 2. Clone / update: `make modules-update`
 
 ```bash
-make modules-install <name> [<name> ...]
+make modules-update <name> [<name> ...]
 ```
 
 A single idempotent command: clones the module into `modules/<name>/src/`
@@ -85,10 +85,10 @@ Name expansion:
 Examples:
 
 ```bash
-make modules-install                                    # every module
-make modules-install redistimeseries
-make modules-install redisbloom redisearch redisjson
-make modules-install all                                # explicit synonym for no-args
+make modules-update                                    # every module
+make modules-update redistimeseries
+make modules-update redisbloom redisearch redisjson
+make modules-update all                                # explicit synonym for no-args
 ```
 
 The clone location is fixed at `modules/<name>/src/` (alongside the pin
@@ -98,7 +98,7 @@ re-clone on subsequent builds.
 
 ### Side effect: `redis.conf` is kept in sync
 
-After cloning, `make modules-install` invokes `make sync-redis-conf` which
+After cloning, `make modules-update` invokes `make sync-redis-conf` which
 rewrites the auto-managed block in `redis.conf` based on which modules
 have a `.prepared` sentinel:
 
@@ -133,16 +133,16 @@ make sync-redis-conf REDIS_CONF=path/to/other.conf   # uncommon override
 
 ### Shallow clones: `make modules-shallow`
 
-`make modules-install` clones with full history by default so tools like
+`make modules-update` clones with full history by default so tools like
 Git Graph, GitLens, or `git log` work as expected. To clone shallow
 (`--depth 1`) instead — useful on CI, or when disk/bandwidth matter — pass
 the flag at install time:
 
 ```bash
-make modules-install redistimeseries MODULES_INSTALL_SHALLOW=1
+make modules-update redistimeseries MODULES_UPDATE_SHALLOW=1
 ```
 
-`make tarball` runs `modules-install all MODULES_INSTALL_SHALLOW=1`
+`make tarball` runs `modules-update all MODULES_UPDATE_SHALLOW=1`
 internally before staging — full history would just inflate the staging
 clone without ending up in the tarball.
 
@@ -155,7 +155,7 @@ make modules-shallow all
 ```
 
 Implementation note: `modules-shallow` removes the existing `modules/<name>/src`
-and re-runs `modules-install` with `MODULES_INSTALL_SHALLOW=1`, since
+and re-runs `modules-update` with `MODULES_UPDATE_SHALLOW=1`, since
 re-shrinking an existing full clone in place is unreliable. Any uncommitted
 changes inside `modules/<name>/src` will be lost.
 
@@ -357,11 +357,11 @@ Python 3.13 or 3.12 is a safer bet than 3.14 if a wheel fails to build.
 
 ```bash
 # First time:
-make modules-install all                       # fetch every module at its pin
+make modules-update all                       # fetch every module at its pin
 make build                                    # build Redis, then every module
 
 # Iterate:
-make modules-install redisbloom                # bump to the current pin (re-runs are safe)
+make modules-update redisbloom                # bump to the current pin (re-runs are safe)
 make build                                    # rebuild
 make run redistimeseries redisbloom           # start Redis with just these two
 
@@ -381,7 +381,7 @@ make test all                                 # every module
 
 Build a self-contained, reproducible source release tarball of Redis +
 every module pinned in `modules.yaml`. The output is "ready to build" —
-no `make modules-install` step required by the consumer.
+no `make modules-update` step required by the consumer.
 
 ```bash
 make tarball TAG=<tag> \
@@ -455,7 +455,7 @@ make tarball TAG=HEAD AVAILABLE_MODULES=redisearch
 ## 9. Full command reference
 
 ```
-make modules-install [<name> ...]            # idempotent: clones if missing, else updates to pin (no args ⇒ all)
+make modules-update [<name> ...]            # idempotent: clones if missing, else updates to pin (no args ⇒ all)
 make sync-redis-conf                         # rewrite redis.conf modules block from `.prepared` state
 make modules-shallow <name> [<name> ...]     # re-clone module(s) shallow (--depth 1) to reclaim disk
 

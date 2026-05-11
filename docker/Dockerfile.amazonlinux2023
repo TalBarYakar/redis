@@ -1,0 +1,32 @@
+# OSNICK=amazonlinux2023 — Amazon Linux 2023 Redis build environment.
+# README does not document this; rely on per-module install_script.sh and
+# its abstract->dnf package map for every dep.
+FROM amazonlinux:2023
+
+WORKDIR /workspace
+ENV OSNICK=amazonlinux2023
+
+# Minimal bootstrap so install_script.sh has bash/awk/tar/git/curl.
+RUN dnf -y install bash gawk tar git curl-minimal && \
+    dnf clean all
+
+COPY modules /workspace/modules
+RUN failed=""; \
+    for name in redistimeseries redisbloom redisjson redisearch; do \
+        script="/workspace/modules/$name/src/.install/install_script.sh"; \
+        if [ -x "$script" ]; then \
+            echo "==> [$name] install_script.sh (OSNICK=$OSNICK)"; \
+            if ! (cd "/workspace/modules/$name/src/.install" && bash install_script.sh); then \
+                echo "==> [$name] WARNING: install_script.sh failed (continuing)"; \
+                failed="$failed $name"; \
+            fi; \
+        else \
+            echo "==> [$name] not cloned, skipping"; \
+        fi; \
+    done; \
+    if [ -n "$failed" ]; then \
+        echo "==> WARNING: module installer(s) failed:$failed"; \
+        echo "==> Image still tagged; affected modules will need their deps installed at runtime."; \
+    else \
+        echo "==> All available module installers completed."; \
+    fi

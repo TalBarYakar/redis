@@ -1,0 +1,51 @@
+# OSNICK=rocky10 — Rocky Linux 10.x Redis build environment.
+# Mirrors docker/Dockerfile.alma10 (same EL10 layout).
+# Rocky 10 isn't published as `library/rockylinux` on Docker Hub yet, so
+# we pull from the project's own quay.io registry like upstream RTS does.
+FROM quay.io/rockylinux/rockylinux:10
+
+WORKDIR /workspace
+ENV OSNICK=rocky10
+
+# Goreleaser repo + Development Tools.
+RUN printf '%s\n' \
+        '[goreleaser]' \
+        'name=GoReleaser' \
+        'baseurl=https://repo.goreleaser.com/yum/' \
+        'enabled=1' \
+        'gpgcheck=0' \
+        > /etc/yum.repos.d/goreleaser.repo && \
+    dnf clean all && \
+    dnf makecache && \
+    dnf -y update && \
+    dnf -y groupinstall "Development Tools"
+
+# Redis prereqs — system gcc on EL10 is current enough; no toolset.
+RUN dnf -y install --nobest --skip-broken \
+        pkg-config xz wget which \
+        git make cmake openssl openssl-devel \
+        python3 python3-pip python3-devel \
+        unzip rsync clang curl libtool automake autoconf jq systemd-devel && \
+    python3 -m venv /opt/venv
+
+# Module deps via per-module install_script.sh (Phase 1 OSNICK env).
+COPY modules /workspace/modules
+RUN failed=""; \
+    for name in redistimeseries redisbloom redisjson redisearch; do \
+        script="/workspace/modules/$name/src/.install/install_script.sh"; \
+        if [ -x "$script" ]; then \
+            echo "==> [$name] install_script.sh (OSNICK=$OSNICK)"; \
+            if ! (cd "/workspace/modules/$name/src/.install" && bash install_script.sh); then \
+                echo "==> [$name] WARNING: install_script.sh failed (continuing)"; \
+                failed="$failed $name"; \
+            fi; \
+        else \
+            echo "==> [$name] not cloned, skipping"; \
+        fi; \
+    done; \
+    if [ -n "$failed" ]; then \
+        echo "==> WARNING: module installer(s) failed:$failed"; \
+        echo "==> Image still tagged; affected modules will need their deps installed at runtime."; \
+    else \
+        echo "==> All available module installers completed."; \
+    fi

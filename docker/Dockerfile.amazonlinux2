@@ -1,0 +1,34 @@
+# OSNICK=amazonlinux2 — Amazon Linux 2 Redis build environment.
+# README does not document AmazonLinux 2; the per-module install_script.sh
+# (with its quirks/amazonlinux2.sh which adds devtoolset-11 + cmake3 +
+# epel) covers everything Redis needs as well.
+FROM amazonlinux:2
+
+WORKDIR /workspace
+ENV OSNICK=amazonlinux2
+
+# install_script.sh requires bash, gawk, and tar; the base image ships
+# them but not always git/curl. Pull the minimal bootstrap set first.
+RUN yum -y install bash gawk tar git curl && \
+    yum clean all
+
+COPY modules /workspace/modules
+RUN failed=""; \
+    for name in redistimeseries redisbloom redisjson redisearch; do \
+        script="/workspace/modules/$name/src/.install/install_script.sh"; \
+        if [ -x "$script" ]; then \
+            echo "==> [$name] install_script.sh (OSNICK=$OSNICK)"; \
+            if ! (cd "/workspace/modules/$name/src/.install" && bash install_script.sh); then \
+                echo "==> [$name] WARNING: install_script.sh failed (continuing)"; \
+                failed="$failed $name"; \
+            fi; \
+        else \
+            echo "==> [$name] not cloned, skipping"; \
+        fi; \
+    done; \
+    if [ -n "$failed" ]; then \
+        echo "==> WARNING: module installer(s) failed:$failed"; \
+        echo "==> Image still tagged; affected modules will need their deps installed at runtime."; \
+    else \
+        echo "==> All available module installers completed."; \
+    fi

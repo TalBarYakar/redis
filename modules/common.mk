@@ -48,7 +48,7 @@ get_source: $(SRC_DIR)/.prepared
 
 $(SRC_DIR)/.prepared:
 	@if [ -d "$(SRC_DIR)/.git" ]; then \
-		echo "==> $(SRC_DIR) already cloned, marking prepared (use 'make modules-install $(notdir $(CURDIR))' to refresh)"; \
+		echo "==> $(SRC_DIR) already cloned, marking prepared (use 'make modules-update $(notdir $(CURDIR))' to refresh)"; \
 	else \
 		mkdir -p $(SRC_DIR); \
 		git clone --recursive --depth 1 --branch $(MODULE_VERSION) $(MODULE_REPO) $(SRC_DIR); \

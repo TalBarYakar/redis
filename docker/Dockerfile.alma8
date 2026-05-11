@@ -1,0 +1,75 @@
+# OSNICK=alma8 — AlmaLinux 8.x Redis build environment.
+# See docker/Dockerfile.focal header for the shared layout rationale.
+#
+# Multi-step prep follows README §"Build and run Redis with all data
+# structures - AlmaLinux 8.10 / Rocky Linux 8.10":
+#   - powertools repo + EPEL for headers like systemd-devel
+#   - gcc-toolset-13 (the system gcc-8 is too old for the redis build)
+#   - cmake installed manually because the goreleaser yum repo and the
+#     packaged dnf cmake are both stale relative to module needs
+FROM almalinux:8
+
+WORKDIR /workspace
+ENV OSNICK=alma8
+
+# 1. Repos + Development Tools — README's prep block, condensed. We use
+#    `printf` rather than a Dockerfile RUN heredoc to stay compatible with
+#    legacy Docker engines that don't support BuildKit heredocs.
+RUN dnf clean all && \
+    printf '%s\n' \
+        '[goreleaser]' \
+        'name=GoReleaser' \
+        'baseurl=https://repo.goreleaser.com/yum/' \
+        'enabled=1' \
+        'gpgcheck=0' \
+        > /etc/yum.repos.d/goreleaser.repo && \
+    dnf -y update && \
+    dnf -y groupinstall "Development Tools" && \
+    dnf config-manager --set-enabled powertools && \
+    dnf -y install epel-release
+
+# 2. Redis prereqs — README's dnf install line + venv + toolset enable.
+RUN dnf -y install --nobest --skip-broken \
+        pkg-config wget gcc-toolset-13-gcc gcc-toolset-13-gcc-c++ \
+        git make openssl openssl-devel \
+        python3.11 python3.11-pip python3.11-devel \
+        unzip rsync clang curl libtool automake autoconf jq systemd-devel && \
+    python3.11 -m venv /opt/venv && \
+    cp /opt/rh/gcc-toolset-13/enable /etc/profile.d/gcc-toolset-13.sh && \
+    echo "source /etc/profile.d/gcc-toolset-13.sh" >> /etc/bashrc
+
+ENV PATH="/opt/rh/gcc-toolset-13/root/usr/bin:${PATH}"
+ENV LD_LIBRARY_PATH="/opt/rh/gcc-toolset-13/root/usr/lib64"
+
+# 3. CMake 3.25.1 manual install (apt/dnf cmake on RHEL 8 family is too old).
+RUN CMAKE_VERSION=3.25.1 && \
+    ARCH=$(uname -m) && \
+    if [ "$ARCH" = "x86_64" ]; then CMAKE_FILE=cmake-${CMAKE_VERSION}-linux-x86_64.sh; \
+    else CMAKE_FILE=cmake-${CMAKE_VERSION}-linux-aarch64.sh; fi && \
+    wget -q https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/${CMAKE_FILE} && \
+    chmod +x ${CMAKE_FILE} && \
+    ./${CMAKE_FILE} --skip-license --prefix=/usr/local --exclude-subdir && \
+    rm ${CMAKE_FILE} && \
+    cmake --version
+
+# 4. Module deps via per-module install_script.sh (Phase 1 OSNICK env).
+COPY modules /workspace/modules
+RUN failed=""; \
+    for name in redistimeseries redisbloom redisjson redisearch; do \
+        script="/workspace/modules/$name/src/.install/install_script.sh"; \
+        if [ -x "$script" ]; then \
+            echo "==> [$name] install_script.sh (OSNICK=$OSNICK)"; \
+            if ! (cd "/workspace/modules/$name/src/.install" && bash install_script.sh); then \
+                echo "==> [$name] WARNING: install_script.sh failed (continuing)"; \
+                failed="$failed $name"; \
+            fi; \
+        else \
+            echo "==> [$name] not cloned, skipping"; \
+        fi; \
+    done; \
+    if [ -n "$failed" ]; then \
+        echo "==> WARNING: module installer(s) failed:$failed"; \
+        echo "==> Image still tagged; affected modules will need their deps installed at runtime."; \
+    else \
+        echo "==> All available module installers completed."; \
+    fi

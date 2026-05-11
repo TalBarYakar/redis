@@ -1,0 +1,63 @@
+# OSNICK=focal — Ubuntu 20.04 Redis build environment.
+#
+# Layout matches docker/Dockerfile.<nick> across the directory:
+#   1. FROM <base>
+#   2. ENV OSNICK so the per-module install_script.sh (Phase 1) can skip
+#      its own auto-detect on minimal images.
+#   3. Redis system deps from README §"Build and run Redis with all data
+#      structures - Ubuntu 20.04 (Focal)".
+#   4. COPY modules + loop each cloned module's install_script.sh.
+# At runtime the user mounts the redis repo on /workspace and runs `make`.
+FROM ubuntu:20.04
+
+WORKDIR /workspace
+ENV OSNICK=focal
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Apt resilience for transient archive/CDN failures (mirrors the upstream
+# RTS Dockerfile.focal — keeps GH-Actions runs from flaking on transient
+# "Connection reset by peer" while pulling .deb metadata).
+RUN printf 'Acquire::Retries "3";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' \
+    > /etc/apt/apt.conf.d/80-retries
+
+# 1. Redis prereqs — README's apt-get line, verbatim.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates wget dpkg-dev gcc g++ libc6-dev libssl-dev make git \
+        python3 python3-pip python3-venv python3-dev \
+        unzip rsync clang automake autoconf gcc-10 g++-10 libtool pkg-config python-is-python3 && \
+    update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 100 \
+        --slave /usr/bin/g++ g++ /usr/bin/g++-10 && \
+    pip3 install cmake==3.31.6 && \
+    ln -sf /usr/local/bin/cmake /usr/bin/cmake && \
+    rm -rf /var/lib/apt/lists/*
+
+# 2. Per-module install_script.sh for whichever modules are cloned in the
+#    build context. Modules absent from `modules/<name>/src/.install/`
+#    (i.e. host has not run `make modules-update` yet) are skipped.
+COPY modules /workspace/modules
+RUN failed=""; \
+    for name in redistimeseries redisbloom redisjson redisearch; do \
+        script="/workspace/modules/$name/src/.install/install_script.sh"; \
+        if [ -x "$script" ]; then \
+            echo "==> [$name] install_script.sh (OSNICK=$OSNICK)"; \
+            if ! (cd "/workspace/modules/$name/src/.install" && bash install_script.sh); then \
+                echo "==> [$name] WARNING: install_script.sh failed (continuing)"; \
+                failed="$failed $name"; \
+            fi; \
+        else \
+            echo "==> [$name] not cloned, skipping"; \
+        fi; \
+    done; \
+    if [ -n "$failed" ]; then \
+        echo "==> WARNING: module installer(s) failed:$failed"; \
+        echo "==> Image still tagged; affected modules will need their deps installed at runtime."; \
+    else \
+        echo "==> All available module installers completed."; \
+    fi
+
+# Build/test loop:
+#   docker build -f docker/Dockerfile.focal -t redis-build:focal .
+#   docker run --rm -it -v "$(pwd):/workspace" -w /workspace redis-build:focal bash
+#   # inside container:
+#   make build

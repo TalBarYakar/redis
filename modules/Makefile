@@ -1,6 +1,6 @@
 
 # Module list comes from ../modules.yaml (single source of truth, also used
-# by `make modules-install` and modules/common.mk via modules/manifest.mk).
+# by `make modules-update` and modules/common.mk via modules/manifest.mk).
 include manifest.mk
 SUBDIRS = $(AVAILABLE_MODULES)
 

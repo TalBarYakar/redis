@@ -1,0 +1,31 @@
+# OSNICK=azurelinux3 — Azure Linux 3 Redis build environment.
+# README does not document Azure Linux; install_script.sh handles every
+# dep via the abstract->tdnf package map and the azurelinux3 quirks.
+FROM mcr.microsoft.com/azurelinux/base/core:3.0
+
+WORKDIR /workspace
+ENV OSNICK=azurelinux3
+
+RUN tdnf -y install bash gawk tar git ca-certificates && \
+    tdnf clean all
+
+COPY modules /workspace/modules
+RUN failed=""; \
+    for name in redistimeseries redisbloom redisjson redisearch; do \
+        script="/workspace/modules/$name/src/.install/install_script.sh"; \
+        if [ -x "$script" ]; then \
+            echo "==> [$name] install_script.sh (OSNICK=$OSNICK)"; \
+            if ! (cd "/workspace/modules/$name/src/.install" && bash install_script.sh); then \
+                echo "==> [$name] WARNING: install_script.sh failed (continuing)"; \
+                failed="$failed $name"; \
+            fi; \
+        else \
+            echo "==> [$name] not cloned, skipping"; \
+        fi; \
+    done; \
+    if [ -n "$failed" ]; then \
+        echo "==> WARNING: module installer(s) failed:$failed"; \
+        echo "==> Image still tagged; affected modules will need their deps installed at runtime."; \
+    else \
+        echo "==> All available module installers completed."; \
+    fi
