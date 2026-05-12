@@ -1,5 +1,8 @@
 # Build context hygiene for docker/Dockerfile.<nick>.
 #
+# Keep repo-root `modules.yaml` and `modules/docker-install-bundled-module-deps.sh`
+# in the context (do not ignore them): Dockerfiles COPY both for bundled-module setup.
+#
 # We deliberately keep `modules/` in the context so each per-module
 # `install_script.sh` (run during image build) has its `dependencies.yaml`
 # and `.install/` tree to work from. Everything excluded below is either

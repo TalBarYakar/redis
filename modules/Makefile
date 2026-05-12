@@ -1,6 +1,7 @@
 
 # Module list comes from ../modules.yaml (single source of truth, also used
-# by `make modules-update` and modules/common.mk via modules/manifest.mk).
+# by `make modules-update`, docker/Dockerfile.* via modules/docker-install-bundled-module-deps.sh,
+# and modules/common.mk via modules/manifest.mk).
 include manifest.mk
 SUBDIRS = $(AVAILABLE_MODULES)
 
