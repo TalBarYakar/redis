@@ -1,4 +1,4 @@
-# Build context hygiene for docker/Dockerfile.<nick>.
+# Build context hygiene for docker/Dockerfile.noble.
 #
 # Keep repo-root `modules.yaml` and `modules/docker-install-bundled-module-deps.sh`
 # in the context (do not ignore them): Dockerfiles COPY both for bundled-module setup.
