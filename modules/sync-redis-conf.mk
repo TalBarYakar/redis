@@ -30,6 +30,16 @@
 #          module.conf (those directives would break redis-server when the
 #          module isn't loaded).
 #
+# Per-module private blocks: anything in a module.conf wrapped in
+#   # >>> BEGIN redis-gen-conf:private <<<
+#   ...
+#   # <<< END redis-gen-conf:private <<<
+# (incl. the marker lines themselves) is stripped on inline. Use for
+# internal/advanced tunables we don't want to advertise in the bundled
+# redis-gen.conf. Multiple blocks per file are fine; nesting is not
+# supported. Files without markers are inlined verbatim, so this is
+# fully opt-in per module.
+#
 # Same logic regardless of whether sync-redis-conf is invoked by
 # `modules-update` (typically: no .so files yet → all modules commented),
 # `build` (typically: requested modules now loadable), or by hand. The
@@ -139,7 +149,9 @@ sync-redis-conf:
 			echo "# >>> BEGIN module: $$name <<<"; \
 			if [ -n "$$so" ] && { [ -f "$$so" ] || [ "$$assume_built" = "1" ]; }; then \
 				if [ -f "$$conf" ]; then \
-					cat "$$conf"; \
+					awk '/^# >>> BEGIN redis-gen-conf:private <<<$$/ { skip=1; next } \
+					     /^# <<< END redis-gen-conf:private <<<$$/   { skip=0; next } \
+					     !skip { print }' "$$conf"; \
 				else \
 					echo "# (no $$conf found)"; \
 				fi; \
