@@ -38,6 +38,8 @@ jobs:
   create-tarball:
     needs: extract-release-info
     runs-on: ubuntu-latest
+    permissions:
+      contents: write          # required for `gh release upload`
     env:
       TAG_NAME: ${{ needs.extract-release-info.outputs.tag_name }}
     outputs:
@@ -80,12 +82,25 @@ jobs:
           echo "SHA256: $SHA256"
           echo "sha256=$SHA256" >> $GITHUB_OUTPUT
 
-      - name: Upload tarball as artifact
+      - name: Upload tarball as workflow artifact
+        # Workflow-run artifact: collaborators-only, auto-deleted after 90 days.
+        # Useful for debugging the workflow run itself.
         uses: actions/upload-artifact@v6
         with:
           name: redis-${{ env.TAG_NAME }}-tarball
           path: /tmp/redis-${{ env.TAG_NAME }}.tar.gz
           compression-level: 0
+
+      - name: Upload tarball as release asset
+        # Release asset: public, permanent, attached to the GitHub Release page
+        # alongside the auto-generated "Source code (zip|tar.gz)" entries.
+        # `--clobber` overwrites if the asset already exists (re-running workflow).
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "$TAG_NAME" \
+            "/tmp/redis-${TAG_NAME}.tar.gz" \
+            --clobber
 
   # approval-gate:
   #   needs: [extract-release-info, create-tarball]
