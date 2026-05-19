@@ -48,7 +48,6 @@ else
     echo "==> [module] $name (modules/$name)"
     mkdir -p "modules/$name"
     if ! "$MAKE_BIN" -C "modules/$name" -f "$REPO_ROOT/modules/common.mk" \
-        MODULE_NAME="$name" \
         RM_INCLUDE_DIR="$REPO_ROOT/src" \
         RS_INCLUDE_DIR="$REPO_ROOT/src" \
         REDIS_SERVER="$REPO_ROOT/src/redis-server"; then

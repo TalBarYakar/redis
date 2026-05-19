@@ -11,10 +11,14 @@ SUBDIRS = $(AVAILABLE_MODULES)
 # from modules.yaml; common.mk reads it via manifest-field.
 COMMON_MK := $(CURDIR)/common.mk
 
+# NOTE: do NOT pass MODULE_NAME on the cmdline. common.mk auto-derives it from
+# $(notdir $(CURDIR)) (the directory basename), and propagating a cmdline value
+# would clobber per-module Makefiles that set MODULE_NAME to their build-output
+# basename (e.g. redisjson uses MODULE_NAME=rejson.so as the .so filename).
 define submake
 	for dir in $(SUBDIRS); do \
 	  mkdir -p "$$dir"; \
-	  $(MAKE) -C "$$dir" -f "$(COMMON_MK)" MODULE_NAME="$$dir" $(1); \
+	  $(MAKE) -C "$$dir" -f "$(COMMON_MK)" $(1); \
 	done
 endef
 
