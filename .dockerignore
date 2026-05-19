@@ -1,7 +1,8 @@
 # Build context hygiene for docker/Dockerfile.noble.
 #
-# Keep repo-root `modules.yaml` and `modules/docker-install-bundled-module-deps.sh`
-# in the context (do not ignore them): Dockerfiles COPY both for bundled-module setup.
+# Keep `modules/modules.yaml` and `modules/docker-install-bundled-module-deps.sh`
+# in the context (do not ignore them): the Dockerfile COPYs the whole modules/
+# tree for bundled-module setup.
 #
 # We deliberately keep `modules/` in the context so each per-module
 # `install_script.sh` (run during image build) has its `dependencies.yaml`
@@ -39,7 +40,7 @@ src/*.dylib
 deps/*/lib*.a
 
 # Module build artefacts (any depth under modules/<name>/)
-modules/*/*.so
+modules/**/*.so
 modules/*/src/bin
 modules/*/src/build
 modules/*/src/target

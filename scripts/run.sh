@@ -14,7 +14,7 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)" || exit 1
 . "$SCRIPT_DIR/lib/manifest.sh"
 cd "$REPO_ROOT"
 
@@ -31,13 +31,12 @@ host_os="$(uname -s | tr '[:upper:]' '[:lower:]')"
 
 load_flags=""
 for name in $selected; do
-  wrapper="modules/$name/Makefile"
-  so_base=""
-  if [ -f "$wrapper" ]; then
-    target="$(awk -F'=' '/^[[:space:]]*TARGET_MODULE[[:space:]]*=/ {sub(/^[ \t]*/,"",$2); sub(/[ \t]*$/,"",$2); print $2; exit}' "$wrapper")"
-    so_base="$(basename "$target")"
-  fi
-  [ -z "$so_base" ] && so_base="$name.so"
+  # Resolve the .so basename from modules.yaml. Prefer `target_module:`
+  # (just-the-artifact), fall back to basename of `loadmodule:`, finally
+  # to `<name>.so` so we still try something even if both fields are empty.
+  so_base="$(basename "$(manifest_field "$name" target_module)")"
+  [ "$so_base" = "." ] || [ -z "$so_base" ] && so_base="$(basename "$(manifest_field "$name" loadmodule)")"
+  [ "$so_base" = "." ] || [ -z "$so_base" ] && so_base="$name.so"
 
   # Each pipeline below ends in `|| true` because grep exits 1 on no match,
   # which combined with `set -euo pipefail` on the parent shell would silently

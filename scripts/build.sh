@@ -14,7 +14,7 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)" || exit 1
 . "$SCRIPT_DIR/lib/manifest.sh"
 cd "$REPO_ROOT"
 
@@ -24,7 +24,12 @@ cloned="$(cloned_modules)"
 modules="$(resolve_modules "$*" "$cloned" "redis none")"
 
 echo "==> Building main Redis (src/)"
-"$MAKE_BIN" -C src all
+if ! "$MAKE_BIN" -C src all; then
+  echo
+  echo "ERROR: Redis core build failed (make -C src all)." >&2
+  echo "       Fix the failure above before module builds will run." >&2
+  exit 1
+fi
 
 failed=""
 if [ -z "$modules" ]; then
@@ -41,10 +46,12 @@ else
   for name in $modules; do
     echo
     echo "==> [module] $name (modules/$name)"
-    if ! "$MAKE_BIN" -C "modules/$name" \
-        RM_INCLUDE_DIR="$PWD/src" \
-        RS_INCLUDE_DIR="$PWD/src" \
-        REDIS_SERVER="$PWD/src/redis-server"; then
+    mkdir -p "modules/$name"
+    if ! "$MAKE_BIN" -C "modules/$name" -f "$REPO_ROOT/modules/common.mk" \
+        MODULE_NAME="$name" \
+        RM_INCLUDE_DIR="$REPO_ROOT/src" \
+        RS_INCLUDE_DIR="$REPO_ROOT/src" \
+        REDIS_SERVER="$REPO_ROOT/src/redis-server"; then
       failed="$failed $name"
       echo "==> [module] $name: FAILED (continuing with remaining modules)"
     fi

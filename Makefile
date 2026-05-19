@@ -11,10 +11,10 @@ endif
 default: all
 
 # Manifest parser (modules.yaml → AVAILABLE_MODULES + helpers) shared with
-# per-module builds via modules/common.mk. sync-redis-conf.mk is included only
-# here so per-module builds don't see its target as their default goal.
+# per-module builds via modules/common.mk. The `sync-redis-conf` target lives
+# in this top-level Makefile (not in manifest.mk) so per-module builds —
+# which include common.mk → manifest.mk — don't see it as their default goal.
 include modules/manifest.mk
-include modules/sync-redis-conf.mk
 
 # ----------------------------------------------------------------------------
 # Positional-arg capture for goals that take a list of module/test names.
@@ -54,13 +54,14 @@ $(foreach pair,$(GOALS_WITH_ARGS), \
 ifeq ($(firstword $(MAKECMDGOALS)),test)
   TEST_ARGS_BAD := $(strip $(foreach m,$(TEST_ARGS),$(if $(findstring :,$(m)),$(m))))
   ifneq ($(TEST_ARGS_BAD),)
-    $(error Test name(s) containing ':' cannot be passed positionally to make: '$(TEST_ARGS_BAD)'. Use TEST=<name> instead, e.g. `gmake test redistimeseries TEST='$(firstword $(TEST_ARGS_BAD))'`)
+    $(error Test name(s) containing ':' cannot be passed positionally to make: '$(TEST_ARGS_BAD)'. Use TEST=<name> instead, e.g. `$(MAKE) test redistimeseries TEST='$(firstword $(TEST_ARGS_BAD))'`)
   endif
 endif
 
 # `sync-redis-conf <name> ...` glue: feed positional args into MODULES (which
-# the recipe in modules/sync-redis-conf.mk reads). Recursive invocations from
-# build/modules-update pass MODULES= explicitly, so SYNC_ARGS stays empty there.
+# the recipe below passes to scripts/sync-redis-conf.sh). Recursive invocations
+# from build/modules-update pass MODULES= explicitly, so SYNC_ARGS stays empty
+# there.
 ifeq ($(firstword $(MAKECMDGOALS)),sync-redis-conf)
   ifneq ($(SYNC_ARGS),)
     MODULES := $(SYNC_ARGS)
@@ -114,5 +115,15 @@ tarball:
 	@TAG='$(TAG)' STAGING_DIR='$(STAGING_DIR)' OUT_PATH='$(OUT_PATH)' \
 	    TAR='$(TAR)' TARBALL_SKIP_MODULES_UPDATE='$(TARBALL_SKIP_MODULES_UPDATE)' \
 	    scripts/tarball.sh
+
+# sync-redis-conf [<name> ...] [MODULES="<names>"] [ASSUME_BUILT=1|yes|true]
+#   Rewrite the untracked redis-gen.conf from redis.conf + modules.yaml +
+#   per-module module.conf files. See scripts/sync-redis-conf.sh for the full
+#   contract (env vars, file layout, private-block stripping).
+sync-redis-conf:
+	@REDIS_CONF='$(REDIS_CONF)' REDIS_GEN_CONF='$(REDIS_GEN_CONF)' \
+	    MODULES='$(strip $(MODULES))' ASSUME_BUILT='$(strip $(ASSUME_BUILT))' \
+	    MODULES_MANIFEST_FILE='$(MODULES_MANIFEST_FILE)' \
+	    scripts/sync-redis-conf.sh
 
 .PHONY: install build run test setup bootstrap modules-update modules-shallow sync-redis-conf tarball

@@ -1,73 +1,78 @@
-# modules/manifest.mk — read fields out of modules.yaml from inside Make.
+# modules/manifest.mk — Make-side API for reading modules.yaml.
 #
-# Included by both the top-level Makefile and modules/common.mk so both
-# have a single, manifest-driven view of the bundled modules without
-# pulling in a shell helper, yq, or python.
+# All YAML parsing lives in scripts/lib/manifest.sh (single source of truth).
+# This file is a thin Make wrapper that:
+#   - resolves the manifest path so $(shell ...) calls work from any CWD
+#     (top-level Makefile, per-module Makefile via common.mk, etc.),
+#   - exposes the data Make needs at PARSE time (AVAILABLE_MODULES),
+#   - exposes the helpers per-module Makefiles use during recipe expansion
+#     ($(call manifest-field,<field>,<name>), $(call manifest-ref,<name>),
+#      $(call manifest-ref-kind,<name>)).
 #
-# What it provides:
+# Why a Make file at all if the parsing lives in a shell script? Because
+# `modules/common.mk` calls $(call manifest-field,...) at parse time to
+# populate per-module variables (MODULE_REPO, MODULE_REF, etc.), and Make
+# has no way to source a shell library — it can only consume strings from
+# `$(shell ...)` invocations. So this file translates the shell library
+# into Make functions.
+#
+# Each helper forks bash → manifest.sh → awk once per call. The manifest
+# is tiny (<1 KB) and helpers are only invoked at parse time, not in
+# build hot loops, so the per-call cost is invisible in practice.
+#
+# What this file provides:
 #   MODULES_MANIFEST_FILE  - path to the YAML manifest, resolved from this
 #                            file's location so callers don't have to set it.
 #   AVAILABLE_MODULES      - sorted, space-separated list of module names.
 #   $(call manifest-field,<field>,<name>)
-#                          - returns the trimmed value of a field for a
-#                            module (empty if the field is empty; empty if
-#                            the module is unknown).
-#   MANIFEST_NAMES_AWK     - awk program text (Make variable). Use as
-#                              awk '$(MANIFEST_NAMES_AWK)' $(MODULES_MANIFEST_FILE)
-#   MANIFEST_FIELD_AWK     - awk program text. Use as
-#                              awk -v want=<name> -v field=<field> \
-#                                  '$(MANIFEST_FIELD_AWK)' $(MODULES_MANIFEST_FILE)
+#                          - one field for one module ("" if missing).
+#   $(call manifest-ref,<name>)
+#                          - resolved ref string
+#                            (priority: tag > version > branch > commit).
+#   $(call manifest-ref-kind,<name>)
+#                          - one of: tag | branch | commit
+#                            (`version` resolves to kind=tag).
 #
-# Implementation notes:
-#   - Both awk programs are single-line on purpose: they get inlined into
-#     `$(shell ...)` calls and into recipe shells, and embedded newlines
-#     would break the latter (Make ends a recipe line at every unescaped
-#     newline).
-#   - Variables are immediate (`:=`) so `$$` collapses to a literal `$` at
-#     parse time. Subsequent `$(MANIFEST_*_AWK)` references just substitute
-#     the stored text, with no further expansion — that's what lets the
-#     awk source contain `$0`, `$/`, etc. without Make/shell interpreting
-#     them.
-#   - Single-quoted in the shell (`awk '$(...)'`) so the shell doesn't
-#     re-interpret any `$` characters inside the awk program either.
-#
-# YAML format the awk parser accepts (kept deliberately narrow): a
-# top-level `modules:` key followed by list items shaped as
-#
-#     - name: <module>
-#       repo: <url>
-#       version: <ref>
-#       commit: <sha-or-empty>
-#
-# No nested structures, no inline comments after values, no quoted strings.
+# YAML format the parser accepts is documented at the top of
+# scripts/lib/manifest.sh.
 
-# Locate the manifest file relative to this .mk file. `$(lastword
-# MAKEFILE_LIST)` is set to this file's path at the moment Make is
-# processing it, so the resulting MODULES_MANIFEST_FILE works regardless
-# of which include chain pulled us in (top-level Makefile, common.mk via
-# a per-module Makefile, etc.).
+# Locate this .mk file's directory; everything else is computed from it so
+# resolution works whether we were included by the repo-root Makefile
+# (CWD = repo root) or by a per-module Makefile via common.mk (CWD =
+# modules/<name>). `$(lastword MAKEFILE_LIST)` is set to this file's path
+# at the moment Make is processing it, so the resulting paths are
+# correctly relative to the per-include CWD.
 MANIFEST_MK_DIR := $(dir $(lastword $(MAKEFILE_LIST)))
-MODULES_MANIFEST_FILE ?= $(MANIFEST_MK_DIR)../modules.yaml
+MODULES_MANIFEST_FILE ?= $(MANIFEST_MK_DIR)modules.yaml
+MANIFEST_SH           := $(MANIFEST_MK_DIR)../scripts/lib/manifest.sh
 
-# Awk program: print one module name per line, in manifest order.
-# `sub()` and `length()` default to operating on $0, so the program text
-# itself doesn't need to mention $0 — fewer surprises through Make+shell.
-MANIFEST_NAMES_AWK := /^[[:space:]]*-[[:space:]]*name:[[:space:]]*/ { sub(/^[[:space:]]*-[[:space:]]*name:[[:space:]]*/, ""); sub(/[[:space:]]+$$/, ""); if (length() > 0) print }
+# Fail loudly when the manifest is missing — better than silently collapsing
+# to an empty $(AVAILABLE_MODULES) and then no-op-ing every downstream target.
+ifeq ($(wildcard $(MODULES_MANIFEST_FILE)),)
+  $(error modules.yaml not found at $(MODULES_MANIFEST_FILE))
+endif
 
-# Awk program: print the value of `field` for the module named `want`
-# (both passed via `-v`). Prints an empty line if the field is present but
-# empty; prints nothing if the module is missing.
-MANIFEST_FIELD_AWK := BEGIN { cur = "" } /^[[:space:]]*-[[:space:]]*name:[[:space:]]*/ { line = $$0; sub(/^[[:space:]]*-[[:space:]]*name:[[:space:]]*/, "", line); sub(/[[:space:]]+$$/, "", line); cur = line; next } cur == want { pat = "^[[:space:]]+" field ":"; if ($$0 ~ pat) { v = $$0; sub("^[[:space:]]+" field ":[[:space:]]*", "", v); sub(/[[:space:]]+$$/, "", v); print v; exit } }
-
-# Make-time helper: $(call manifest-field,<field>,<name>).
-# Re-runs awk on every reference (it's `=`, not `:=`) which is fine — the
-# manifest is small and this is only invoked at parse time, not in hot loops.
-manifest-field = $(shell awk -v want="$2" -v field="$1" '$(MANIFEST_FIELD_AWK)' $(MODULES_MANIFEST_FILE) 2>/dev/null)
+# Common prefix for every $(shell ...) below. Passing MODULES_MANIFEST_FILE
+# explicitly means the script uses Make's resolution of the path (which
+# honors per-module CWD offsets) instead of recomputing its own from
+# REPO_ROOT.
+_MANIFEST_SH := MODULES_MANIFEST_FILE='$(MODULES_MANIFEST_FILE)' $(MANIFEST_SH)
 
 # Sorted list of every module known to the manifest. Computed once at parse
-# time. Empty if the manifest is missing or unreadable; downstream targets
+# time. Empty if the manifest is empty or unreadable; downstream targets
 # already handle that case.
-AVAILABLE_MODULES := $(sort $(shell awk '$(MANIFEST_NAMES_AWK)' $(MODULES_MANIFEST_FILE) 2>/dev/null))
+AVAILABLE_MODULES := $(shell $(_MANIFEST_SH) modules 2>/dev/null)
+
+# Recursive (=) so each call re-invokes the script with the current args.
+# Argument order matches the original Make-internal signatures:
+#   $(call manifest-field,<field>,<name>)  — note: field first, name second
+#   $(call manifest-ref,<name>)
+#   $(call manifest-ref-kind,<name>)
+# The script's CLI is the other way around (`field <name> <field>`), to
+# match the underlying shell-function signatures; the wrapper just swaps.
+manifest-field    = $(shell $(_MANIFEST_SH) field "$2" "$1" 2>/dev/null)
+manifest-ref      = $(shell $(_MANIFEST_SH) ref "$1" 2>/dev/null)
+manifest-ref-kind = $(shell $(_MANIFEST_SH) ref-kind "$1" 2>/dev/null)
 
 # Note: this file intentionally defines NO targets.
 #
@@ -75,6 +80,5 @@ AVAILABLE_MODULES := $(sort $(shell awk '$(MANIFEST_NAMES_AWK)' $(MODULES_MANIFE
 # Makefile) include manifest.mk to read the manifest. If we declared a
 # target here, it would become the default goal of any per-module
 # `make -C modules/<name>` invocation (since GNU Make uses the first
-# non-pattern target it sees). The companion file `sync-redis-conf.mk`
-# carries the `sync-redis-conf` recipe and is included only by the
-# top-level Makefile.
+# non-pattern target it sees). Repo-wide targets like `sync-redis-conf`
+# live in the top-level Makefile so per-module builds don't see them.

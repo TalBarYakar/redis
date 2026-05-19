@@ -10,8 +10,18 @@
 #   - `make tarball` to clone modules at their pinned ref into the
 #     release source tarball
 #
-# To bump a module: edit `version` (tag/branch) and/or `commit` (exact SHA;
-# takes precedence over `version` when non-empty), then run
+# Ref selection — each module is pinned to exactly one of:
+#   tag:    <git tag>      preferred for releases (immutable)
+#   branch: <git branch>   for feature work / floating refs
+#   commit: <full SHA>     for exact pinning when no tag exists
+#   version: <ref>         legacy alias for `tag` (still accepted)
+#
+# Priority when more than one is set: tag > version > branch > commit.
+# `version` is treated as an alias for `tag` and shares its priority tier.
+# At least one of these must be set; otherwise modules-update / build will
+# error loudly.
+#
+# To bump a module: edit the appropriate field and run
 # `make modules-update <name>` to refresh the local clone.
 #
 # Format (kept deliberately simple so a small awk helper can parse it without
@@ -19,8 +29,15 @@
 #   modules:
 #     - name: <module-name>            # directory under modules/
 #       repo: <git URL>
-#       version: <tag-or-branch>       # required if `commit` is empty
-#       commit: <sha-or-empty>         # optional; wins over `version`
+#       tag:    <tag-or-empty>         # optional
+#       branch: <branch-or-empty>      # optional
+#       commit: <sha-or-empty>         # optional
+#       version: <legacy-alias>        # optional; treated as `tag`
+#       target_module: <path>          # build artifact path relative to
+#                                      # src/bin/<os>-<arch>-release/ (i.e.
+#                                      # the .so the upstream build produces).
+#                                      # Examples: `redisbloom.so`,
+#                                      # `search-community/redisearch.so`.
 #       loadmodule: <path-to-.so>      # used by `make modules-update` to
 #                                      # rewrite the auto-managed block in
 #                                      # redis.conf; the .so basename does not
@@ -35,21 +52,33 @@
 modules:
   - name: redisbloom
     repo: https://github.com/redisbloom/redisbloom
-    version: make_setup_with_redis_docker
+    tag:
+    branch: make_setup_with_redis_docker
     commit:
+    version:
+    target_module: redisbloom.so
     loadmodule: ./modules/redisbloom/redisbloom.so
   - name: redisearch
     repo: https://github.com/redisearch/redisearch
-    version: v8.7.90
+    tag: v8.7.90
+    branch:
     commit:
+    version:
+    target_module: search-community/redisearch.so
     loadmodule: ./modules/redisearch/redisearch.so
   - name: redisjson
     repo: https://github.com/redisjson/redisjson
-    version: make_set_tup_with_redis_dockers
+    tag:
+    branch:
     commit:
+    version: make_set_tup_with_redis_dockers
+    target_module: rejson.so
     loadmodule: ./modules/redisjson/rejson.so
   - name: redistimeseries
     repo: https://github.com/redistimeseries/redistimeseries
-    version: make_set_up_new_with_redis_dockers
+    tag:
+    branch: make_set_up_new_with_redis_dockers
     commit:
+    version:
+    target_module: redistimeseries.so
     loadmodule: ./modules/redistimeseries/redistimeseries.so

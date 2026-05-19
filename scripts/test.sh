@@ -12,7 +12,7 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)" || exit 1
 . "$SCRIPT_DIR/lib/manifest.sh"
 cd "$REPO_ROOT"
 
@@ -54,7 +54,7 @@ case "$target" in
       echo
       echo "==> [test] $name (modules/$name/src)"
       if ! "$MAKE_BIN" -C "modules/$name/src" test \
-          REDIS_SERVER="$PWD/src/redis-server"; then
+          REDIS_SERVER="$REPO_ROOT/src/redis-server"; then
         failed="$failed $name"
       fi
     done
@@ -67,7 +67,7 @@ case "$target" in
     ;;
   *)
     ok=""
-    for c in $cloned; do [ "$c" = "$target" ] && ok=1; done
+    case " $cloned " in *" $target "*) ok=1 ;; esac
     if [ -z "$ok" ]; then
       echo "ERROR: module '$target' is not cloned under modules/$target/src"
       echo "Cloned modules: $cloned"
@@ -92,11 +92,11 @@ case "$target" in
     if [ -z "$tname" ]; then
       echo "==> Running all tests for module '$target'"
       exec "$MAKE_BIN" -C "modules/$target/src" test \
-          REDIS_SERVER="$PWD/src/redis-server"
+          REDIS_SERVER="$REPO_ROOT/src/redis-server"
     else
       echo "==> Running test '$tname' for module '$target' (TEST=$tname)"
       exec "$MAKE_BIN" -C "modules/$target/src" test TEST="$tname" \
-          REDIS_SERVER="$PWD/src/redis-server"
+          REDIS_SERVER="$REPO_ROOT/src/redis-server"
     fi
     ;;
 esac

@@ -16,7 +16,7 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)" || exit 1
 . "$SCRIPT_DIR/lib/manifest.sh"
 cd "$REPO_ROOT"
 
@@ -52,6 +52,12 @@ out="${OUT_PATH:-/tmp/redis-$TAG.tar.gz}"
 prefix="redis-$TAG"
 work="$staging/$prefix"
 
+# Paranoia: refuse to rm -rf any path that isn't clearly a temp/staging dir.
+case "$staging" in
+  /tmp/*|/var/tmp/*|"$HOME"/.cache/*) ;;
+  *) echo "ERROR: refusing to rm -rf STAGING_DIR='$staging' (must be under /tmp, /var/tmp, or \$HOME/.cache)" >&2; exit 1 ;;
+esac
+
 echo "==> Staging at $staging"
 rm -rf "$staging"
 mkdir -p "$work"
@@ -62,23 +68,30 @@ echo
 echo "==> Cloning bundled modules per modules.yaml"
 for name in $(manifest_modules); do
   repo="$(manifest_field "$name" repo)"
-  version="$(manifest_field "$name" version)"
-  commit="$(manifest_field "$name" commit)"
+  ref="$(manifest_ref "$name")"
+  kind="$(manifest_ref_kind "$name")"
   dest="$work/modules/$name/src"
   mkdir -p "$work/modules/$name"
-  if [ -n "$commit" ]; then
-    echo "  --> $name @ commit $commit ($repo)"
-    git init -q "$dest"
-    git -C "$dest" remote add origin "$repo"
-    if ! git -C "$dest" fetch --depth 1 origin "$commit" 2>/dev/null; then
-      git -C "$dest" fetch origin
-    fi
-    git -C "$dest" checkout -q --detach "$commit"
-    git -C "$dest" submodule update --init --recursive --depth 1
-  else
-    echo "  --> $name @ $version ($repo)"
-    git clone --recursive --depth 1 --branch "$version" "$repo" "$dest"
+  if [ -z "$ref" ] || [ -z "$kind" ]; then
+    echo "ERROR: '$name' must set one of tag/version/branch/commit in modules.yaml" >&2
+    exit 1
   fi
+  case "$kind" in
+    commit)
+      echo "  --> $name @ commit $ref ($repo)"
+      git init -q "$dest"
+      git -C "$dest" remote add origin "$repo"
+      if ! git -C "$dest" fetch --depth 1 origin "$ref" 2>/dev/null; then
+        git -C "$dest" fetch origin
+      fi
+      git -C "$dest" checkout -q --detach "$ref"
+      git -C "$dest" submodule update --init --recursive --depth 1
+      ;;
+    tag|branch)
+      echo "  --> $name @ $kind $ref ($repo)"
+      git clone --recursive --depth 1 --branch "$ref" "$repo" "$dest"
+      ;;
+  esac
 done
 
 echo
@@ -97,14 +110,30 @@ fi
 
 echo
 echo "==> Generating redis-gen.conf in staging (all manifest modules, ASSUME_BUILT=1)"
-cp modules/sync-redis-conf.mk "$work/modules/sync-redis-conf.mk"
-"$MAKE_BIN" -C "$work" --no-print-directory sync-redis-conf ASSUME_BUILT=1
+# Overlay the LOCAL sync-redis-conf script + its lib + the manifest on top
+# of whatever came in from `git archive $TAG`, so tarball-time fixes (or
+# the modules.yaml-into-modules/ relocation) don't require re-tagging Redis
+# core. If $TAG predates that relocation, drop the stale root-level
+# modules.yaml so the in-staging tooling has exactly one manifest to find.
+mkdir -p "$work/scripts/lib" "$work/modules"
+cp scripts/sync-redis-conf.sh "$work/scripts/sync-redis-conf.sh"
+cp scripts/lib/manifest.sh    "$work/scripts/lib/manifest.sh"
+cp modules/modules.yaml       "$work/modules/modules.yaml"
+chmod +x "$work/scripts/sync-redis-conf.sh"
+rm -f "$work/modules.yaml"
+# Run the script directly against the staging tree (we don't need Make
+# here — the script is the contract).
+( cd "$work" && ASSUME_BUILT=1 scripts/sync-redis-conf.sh )
 echo "==> Promoting redis-gen.conf -> redis.conf, removing redis-gen.conf"
 mv "$work/redis-gen.conf" "$work/redis.conf"
 
 echo
 echo "==> Producing reproducible tarball at $out"
 mtime="$(git log -1 --format=%ct "$TAG")"
+if [ -z "$mtime" ]; then
+  echo "ERROR: could not resolve commit timestamp for TAG=$TAG" >&2
+  exit 1
+fi
 rm -f "$out"
 ( cd "$staging" && "$TAR" \
     --sort=name \
@@ -116,15 +145,20 @@ rm -f "$out"
 echo "==> Cleaning staging $staging"
 rm -rf "$staging"
 
+compute_sha256() {
+  local f="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$f" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$f" | awk '{print $1}'
+  else
+    openssl dgst -sha256 "$f" | awk '{print $NF}'
+  fi
+}
+
 echo
 echo "==> Tarball ready: $out"
 size="$(du -h "$out" | awk '{print $1}')"
-if command -v sha256sum >/dev/null 2>&1; then
-  sha="$(sha256sum "$out" | awk '{print $1}')"
-elif command -v shasum >/dev/null 2>&1; then
-  sha="$(shasum -a 256 "$out" | awk '{print $1}')"
-else
-  sha="$(openssl dgst -sha256 "$out" | awk '{print $NF}')"
-fi
+sha="$(compute_sha256 "$out")"
 echo "    size:    $size"
 echo "    sha256:  $sha"

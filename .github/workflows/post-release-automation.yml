@@ -6,7 +6,7 @@ on:
 
 jobs:
   extract-release-info:
-    if: github.repository == 'TalBarYakar/redis'
+    if: github.repository == 'redis/redis'
     runs-on: ubuntu-latest
     outputs:
       tag_name: ${{ steps.release-info.outputs.tag_name }}
@@ -82,9 +82,7 @@ jobs:
           echo "SHA256: $SHA256"
           echo "sha256=$SHA256" >> $GITHUB_OUTPUT
 
-      - name: Upload tarball as workflow artifact
-        # Workflow-run artifact: collaborators-only, auto-deleted after 90 days.
-        # Useful for debugging the workflow run itself.
+      - name: Upload tarball as artifact
         uses: actions/upload-artifact@v6
         with:
           name: redis-${{ env.TAG_NAME }}-tarball
@@ -101,6 +99,17 @@ jobs:
           gh release upload "$TAG_NAME" \
             "/tmp/redis-${TAG_NAME}.tar.gz" \
             --clobber
+
+  # ---------------------------------------------------------------------------
+  # Jobs below are intentionally commented out — placeholders for the rest of
+  # the post-release pipeline (approval gate, public download upload, release
+  # smoke-test, hash file update). They're blocked on:
+  #   - approval-gate:        GitHub Environment with required reviewers
+  #   - upload-tarball:       SSH credentials for download.redis.io
+  #   - test-release-tarball: clean-room build of the uploaded tarball
+  #   - update-release-hashes: write access to the redis-hashes repository
+  # Enable each when its prerequisites are in place.
+  # ---------------------------------------------------------------------------
 
   # approval-gate:
   #   needs: [extract-release-info, create-tarball]
@@ -150,7 +159,7 @@ jobs:
 
   summary-and-notify:
     needs: [extract-release-info, create-tarball] # update-release-hashes
-    if: always() && github.repository == 'TalBarYakar/redis'
+    if: always() && github.repository == 'redis/redis'
     runs-on: ubuntu-latest
     env:
       TAG_NAME: ${{ needs.extract-release-info.outputs.tag_name }}

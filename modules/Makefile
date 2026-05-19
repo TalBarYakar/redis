@@ -1,12 +1,21 @@
 
-# Module list comes from ../modules.yaml (single source of truth, also used
-# by `make modules-update`, docker/Dockerfile.noble via modules/docker-install-bundled-module-deps.sh,
-# and modules/common.mk via modules/manifest.mk).
+# Module list comes from modules.yaml in this directory (single source of
+# truth, also used by `make modules-update`, docker/Dockerfile.noble via
+# modules/docker-install-bundled-module-deps.sh, and modules/common.mk via
+# modules/manifest.mk).
 include manifest.mk
 SUBDIRS = $(AVAILABLE_MODULES)
 
+# Per-module dispatch: invoke common.mk inside modules/<name>/ — no per-module
+# Makefile stub required. Build data (target_module path, ref, repo) all comes
+# from modules.yaml; common.mk reads it via manifest-field.
+COMMON_MK := $(CURDIR)/common.mk
+
 define submake
-	for dir in $(SUBDIRS); do $(MAKE) -C $$dir $(1); done
+	for dir in $(SUBDIRS); do \
+	  mkdir -p "$$dir"; \
+	  $(MAKE) -C "$$dir" -f "$(COMMON_MK)" MODULE_NAME="$$dir" $(1); \
+	done
 endef
 
 all: prepare_source
@@ -92,4 +101,4 @@ ifeq ($(DISABLE_WERRORS),yes)
 	done
 endif
 
-.PHONY: all clean distclean install $(SUBDIRS) setup_environment clean_environment install-rust uninstall-rust handle-werrors
+.PHONY: all clean distclean pristine install $(SUBDIRS) get_source prepare_source setup_environment clean_environment install-rust uninstall-rust handle-werrors

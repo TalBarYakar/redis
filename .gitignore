@@ -42,6 +42,8 @@ Makefile.dep
 compile_commands.json
 redis.code-workspace
 
+# External bundled modules — cloned (not git submodules) into modules/<name>/src/
+# by `make modules-update`. See modules/modules.yaml + modules/MODULES.md.
 modules/redisbloom/src/
 modules/redisearch/src/
 modules/redisjson/src/

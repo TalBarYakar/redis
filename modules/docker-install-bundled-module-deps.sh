@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 #
 # Docker image build ONLY — not invoked by `make bootstrap`.
-# During `docker build`, runs each entry from repo-root `modules.yaml` through
+# During `docker build`, runs each entry from `modules/modules.yaml` through
 # that module's `src/.install/install_script.sh` (same scripts as a dev
 # would run from `make bootstrap` per module).
 #
 # Environment:
 #   ROOT             workspace root (default: /workspace)
-#   MODULES_MANIFEST path to modules.yaml (default: $ROOT/modules.yaml)
+#   MODULES_MANIFEST path to modules.yaml (default: $ROOT/modules/modules.yaml)
 #   DOCKER_STRICT=1|true|yes  fail the image build if any install_script fails
 #
-set -eu
+set -euo pipefail
 
 ROOT="${ROOT:-/workspace}"
-MANIFEST="${MODULES_MANIFEST:-$ROOT/modules.yaml}"
+MANIFEST="${MODULES_MANIFEST:-$ROOT/modules/modules.yaml}"
 ME="docker-install-bundled-module-deps.sh"
 
 if [ ! -f "$MANIFEST" ]; then
@@ -41,7 +41,7 @@ module_names() {
 	' "$MANIFEST"
 }
 
-_tmp="$(mktemp)"
+_tmp="$(mktemp)" || { echo "$ME: ERROR: mktemp failed" >&2; exit 1; }
 trap 'rm -f "$_tmp"' EXIT
 module_names >"$_tmp"
 if [ ! -s "$_tmp" ]; then
@@ -60,7 +60,11 @@ while IFS= read -r name; do
 		chmod +x "$script" 2>/dev/null || true
 	fi
 	echo "==> [$name] install_script.sh (OSNICK=${OSNICK:-unknown})"
-	if ! (cd "$(dirname "$script")" && bash "$script"); then
+	script_dir="$(dirname "$script")"
+	if ! ( cd "$script_dir" 2>/dev/null ); then
+		echo "==> [$name] WARNING: cannot enter $script_dir (continuing)"
+		failed="${failed}${failed:+ }${name}"
+	elif ! ( cd "$script_dir" && bash "$script" ); then
 		echo "==> [$name] WARNING: install_script.sh failed (continuing)"
 		failed="${failed}${failed:+ }${name}"
 	fi

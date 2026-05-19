@@ -9,7 +9,7 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)" || exit 1
 . "$SCRIPT_DIR/lib/manifest.sh"
 cd "$REPO_ROOT"
 
@@ -39,61 +39,74 @@ for name in $requested; do
   esac
 
   repo="$(manifest_field "$name" repo)"
-  version="$(manifest_field "$name" version)"
-  commit="$(manifest_field "$name" commit)"
+  ref="$(manifest_ref "$name")"
+  kind="$(manifest_ref_kind "$name")"
   dest="modules/$name/src"
 
   if [ -z "$repo" ]; then
     echo "ERROR: 'repo' is not set for '$name' in modules.yaml"; exit 1
   fi
-  if [ -z "$commit" ] && [ -z "$version" ]; then
-    echo "ERROR: need either 'commit' or 'version' for '$name' in modules.yaml"; exit 1
+  if [ -z "$ref" ] || [ -z "$kind" ]; then
+    echo "ERROR: '$name' must set one of tag/version/branch/commit in modules.yaml"; exit 1
   fi
 
   if [ ! -d "$dest/.git" ]; then
     rm -rf "$dest"
-    if [ -n "$commit" ]; then
-      echo "==> Cloning $name @ commit $commit from $repo into $dest"
-      git init -q "$dest"
-      git -C "$dest" remote add origin "$repo"
-      if [ -n "$depth_args" ]; then
-        git -C "$dest" fetch $depth_args origin "$commit" 2>/dev/null \
-          || { echo "    (shallow SHA fetch not supported by server, doing full fetch)"; \
-               git -C "$dest" fetch origin; }
-      else
-        git -C "$dest" fetch origin
-      fi
-      git -C "$dest" checkout -q --detach "$commit"
-      git -C "$dest" submodule update --init --recursive $depth_args
-    else
-      echo "==> Cloning $name $version from $repo into $dest"
-      git clone --recursive $depth_args --branch "$version" "$repo" "$dest"
-    fi
-  else
-    if [ -n "$commit" ]; then
-      current="$(git -C "$dest" rev-parse HEAD)"
-      if [ "$current" = "$commit" ] || [ "${current#$commit}" != "$current" ]; then
-        echo "==> $name already at commit $commit"
-      else
-        echo "==> Moving $name to commit $commit"
+    case "$kind" in
+      tag|branch)
+        echo "==> Cloning $name @ $kind $ref from $repo into $dest"
+        git clone --recursive $depth_args --branch "$ref" "$repo" "$dest"
+        ;;
+      commit)
+        echo "==> Cloning $name @ commit $ref from $repo into $dest"
+        git init -q "$dest"
+        git -C "$dest" remote add origin "$repo"
         if [ -n "$depth_args" ]; then
-          git -C "$dest" fetch $depth_args origin "$commit" 2>/dev/null \
+          git -C "$dest" fetch $depth_args origin "$ref" 2>/dev/null \
             || { echo "    (shallow SHA fetch not supported by server, doing full fetch)"; \
                  git -C "$dest" fetch origin; }
         else
-          git -C "$dest" fetch origin "$commit" 2>/dev/null \
-            || git -C "$dest" fetch origin
+          git -C "$dest" fetch origin
         fi
-        git -C "$dest" checkout -f --detach "$commit"
-      fi
-    else
-      echo "==> Ensuring $name is at $version"
-      git -C "$dest" fetch $depth_args origin "$version" 2>/dev/null \
-        || git -C "$dest" fetch $depth_args origin "refs/tags/$version:refs/tags/$version" 2>/dev/null \
-        || git -C "$dest" fetch origin
-      git -C "$dest" checkout -f "$version" 2>/dev/null \
-        || git -C "$dest" reset --hard FETCH_HEAD
-    fi
+        git -C "$dest" checkout -q --detach "$ref"
+        git -C "$dest" submodule update --init --recursive $depth_args
+        ;;
+    esac
+  else
+    case "$kind" in
+      commit)
+        current="$(git -C "$dest" rev-parse HEAD)" || {
+          echo "ERROR: git rev-parse HEAD failed in $dest" >&2
+          exit 1
+        }
+        if [ -z "$current" ]; then
+          echo "ERROR: empty HEAD in $dest" >&2
+          exit 1
+        fi
+        if [ "$current" = "$ref" ] || [ "${current#$ref}" != "$current" ]; then
+          echo "==> $name already at commit $ref"
+        else
+          echo "==> Moving $name to commit $ref"
+          if [ -n "$depth_args" ]; then
+            git -C "$dest" fetch $depth_args origin "$ref" 2>/dev/null \
+              || { echo "    (shallow SHA fetch not supported by server, doing full fetch)"; \
+                   git -C "$dest" fetch origin; }
+          else
+            git -C "$dest" fetch origin "$ref" 2>/dev/null \
+              || git -C "$dest" fetch origin
+          fi
+          git -C "$dest" checkout -f --detach "$ref"
+        fi
+        ;;
+      tag|branch)
+        echo "==> Ensuring $name is at $kind $ref"
+        git -C "$dest" fetch $depth_args origin "$ref" 2>/dev/null \
+          || git -C "$dest" fetch $depth_args origin "refs/tags/$ref:refs/tags/$ref" 2>/dev/null \
+          || git -C "$dest" fetch origin
+        git -C "$dest" checkout -f "$ref" 2>/dev/null \
+          || git -C "$dest" reset --hard FETCH_HEAD
+        ;;
+    esac
     echo "==> Re-syncing submodules for $name"
     git -C "$dest" submodule sync --recursive
     git -C "$dest" submodule update --init --recursive $depth_args
