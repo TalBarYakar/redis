@@ -54,7 +54,7 @@ jobs:
           fetch-depth: 0
 
       - name: Create tarball
-        run: make tarball TAG="$TAG_NAME"
+        run: ./utils/releasetools/01_create_tarball.sh "$TAG_NAME"
 
       - name: Verify tarball size
         id: size
