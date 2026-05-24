@@ -39,6 +39,7 @@ fi
 echo "==> Bootstrapping: $selected"
 export PIP_BREAK_SYSTEM_PACKAGES=1
 failed=""
+skipped=""
 for name in $selected; do
   echo
   echo "==> [bootstrap] $name"
@@ -46,7 +47,7 @@ for name in $selected; do
   if [ ! -f "$src_mk" ]; then
     echo "    !! SKIP: $src_mk does not exist"
     echo "       (the upstream clone may be incomplete; try 'make modules-update $name')"
-    failed="$failed $name"
+    skipped="$skipped $name"
     continue
   fi
   if ! grep -qE '^bootstrap[[:space:]]*:' "$src_mk"; then
@@ -56,7 +57,7 @@ for name in $selected; do
     echo "                   ./sbin/setup"
     echo "           .PHONY: bootstrap"
     echo "       then commit & push to the module's repo."
-    failed="$failed $name"
+    skipped="$skipped $name"
     continue
   fi
   if ! "$MAKE_BIN" -C "modules/$name/src" bootstrap; then
@@ -65,8 +66,11 @@ for name in $selected; do
 done
 
 echo
+if [ -n "$skipped" ]; then
+  echo "==> Bootstrap SKIPPED for:$skipped (no usable 'bootstrap' target in module Makefile)"
+fi
 if [ -n "$failed" ]; then
-  echo "==> Bootstrap completed with FAILURES for:$failed"
+  echo "==> Bootstrap FAILED for:$failed"
   echo "    Re-run 'make bootstrap$failed' after fixing the issues above."
   exit 1
 fi
