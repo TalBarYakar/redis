@@ -62,7 +62,11 @@ else
 fi
 
 echo
-echo "==> Build complete."
+if [ -n "$failed" ]; then
+  echo "==> Build finished with module failure(s):$failed"
+else
+  echo "==> Build complete."
+fi
 echo "    redis-server: $PWD/src/redis-server"
 if [ -n "$modules" ]; then
   echo "    Module artifacts:"
@@ -87,6 +91,6 @@ echo "==> Refreshing redis-gen.conf via sync-redis-conf"
 
 if [ -n "$failed" ]; then
   echo
-  echo "ERROR: make build finished with module failure(s):$failed"
+  echo "ERROR: make build finished with module failure(s):$failed" >&2
   exit 1
 fi
