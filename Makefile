@@ -96,12 +96,29 @@ endif
 install:
 	for dir in $(SUBDIRS); do $(MAKE) -C $$dir $@; done
 
+# ----------------------------------------------------------------------------
+# Core-only fast path. Core Redis must stay buildable with POSIX sh + make +
+# a compiler alone — no bash (upstream requirement; bash is an accepted
+# dependency of the MODULES flow only). When no modules are cloned and the
+# invocation asks for no module work (bare goal, or only the core/redis/none
+# synonyms), build/clean/test recurse straight into src/ exactly like
+# upstream Redis. Everything module-flavored dispatches to scripts/*, which
+# are bash. The markers below mirror cloned_modules() in
+# scripts/lib/manifest.sh: a module counts as cloned when modules/<n>/src
+# has .git (dev clone) or .prepared (release tarball).
+# ----------------------------------------------------------------------------
+CLONED_MODULE_MARKERS := $(wildcard modules/*/src/.git) $(wildcard modules/*/src/.prepared)
+
 # clean [<name> ...|all|.|redis|none] — Redis core + selected modules.
 # Same per-module dispatch as scripts/build.sh. Env vars set on the make
 # line (e.g. `make clean DEPS=1`) propagate to the per-module clean via
 # the shell environment.
 clean:
+ifeq ($(strip $(CLONED_MODULE_MARKERS) $(filter-out redis none,$(CLEAN_ARGS))),)
+	$(MAKE) -C src clean
+else
 	+@scripts/clean.sh $(CLEAN_ARGS)
+endif
 
 # ----------------------------------------------------------------------------
 # Module / build / test orchestration. Recipes are thin wrappers around
@@ -128,8 +145,13 @@ clean:
 all: build
 
 # build [<name> ...|all|.|redis|core|none] — Redis core + selected modules.
+# Core-only invocations (see fast-path block above) never touch the scripts.
 build:
+ifeq ($(strip $(CLONED_MODULE_MARKERS) $(filter-out core redis none,$(BUILD_ARGS))),)
+	$(MAKE) -C src all
+else
 	+@scripts/build.sh $(BUILD_ARGS)
+endif
 
 # bootstrap [<name> ...|all|.] — install per-module build/test prereqs.
 bootstrap:
@@ -150,8 +172,13 @@ run:
 	@ARGS='$(ARGS)' scripts/run.sh $(RUN_ARGS)
 
 # test [redis|all|<module> [<test_name>]] [TEST=<name>] — see scripts/test.sh.
+# TEST= forces the script path so its selector validation still applies.
 test:
+ifeq ($(strip $(CLONED_MODULE_MARKERS) $(filter-out redis none,$(TEST_ARGS)) $(TEST)),)
+	$(MAKE) -C src test
+else
 	+@TEST='$(TEST)' scripts/test.sh $(TEST_ARGS)
+endif
 
 # modules-update [<name> ...|all|.] [MODULES_UPDATE_SHALLOW=1]
 #   Idempotent clone/refresh per modules.yaml.
