@@ -51,14 +51,16 @@ jobs:
       env:
         PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
     env:
-      # GCC 12 (bookworm) has a false-positive -Wuninitialized inside its own
-      # avx512fintrin.h (_mm256_undefined_pd self-init, GCC PR105593, fixed in
-      # GCC 13) which VectorSimilarity's unconditional -Werror turns fatal on
-      # x86_64. Job-level (not build-step-level) because redisearch's `make
-      # test` re-drives its cmake build with BUILD_TESTS=1, recompiling the
-      # same sources — the flag must reach that rebuild too. Redis core is
-      # pure C and ignores CXXFLAGS.
-      CXXFLAGS: -Wno-error=uninitialized
+      # GCC 12 (bookworm) has false positives inside its own avx512fintrin.h
+      # (_mm256_undefined_pd self-init, GCC PR105593, fixed in GCC 13) which
+      # VectorSimilarity's unconditional -Werror turns fatal on x86_64. The
+      # headers trip BOTH the -Wuninitialized and -Wmaybe-uninitialized
+      # variants depending on the intrinsic, so both must be non-fatal.
+      # Job-level (not build-step-level) because redisearch's `make test`
+      # re-drives its cmake build with BUILD_TESTS=1, recompiling the same
+      # sources — the flags must reach that rebuild too. Redis core is pure C
+      # and ignores CXXFLAGS.
+      CXXFLAGS: -Wno-error=uninitialized -Wno-error=maybe-uninitialized
     strategy:
       fail-fast: false
       # Both architectures the bundled modules support, mirroring their own
