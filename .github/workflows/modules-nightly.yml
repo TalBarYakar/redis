@@ -143,6 +143,23 @@ jobs:
           grep -qx "$m" module-list.txt || { echo "MISSING MODULE: $m"; exit 1; }
         done
         ./src/redis-cli shutdown nosave || true
+    # redisearch's `make test` runs its Rust suite via `cargo nextest`, but
+    # its `make bootstrap` installs only the toolchain — upstream CI provisions
+    # nextest separately (.install/test_deps/install_rust_deps.sh, pinned
+    # 0.9.130). Until that lands in the module's bootstrap, install the same
+    # pinned prebuilt into the cargo bin dir bootstrap created; cargo resolves
+    # cargo-* subcommands from there, so the pinned container PATH is fine.
+    - name: install cargo-nextest (redisearch test dep not covered by bootstrap)
+      if: ${{ !contains(github.event.inputs.skiptests, 'modules') }}
+      run: |
+        arch=$(uname -m)
+        case '${{ matrix.family }}' in
+          apk) if [ "$arch" = aarch64 ]; then t=linux-arm-musl; else t=linux-musl; fi ;;
+          *)   if [ "$arch" = aarch64 ]; then t=linux-arm;      else t=linux;      fi ;;
+        esac
+        mkdir -p "$HOME/.cargo/bin"
+        curl -LsSf "https://get.nexte.st/0.9.130/$t" | tar zxf - -C "$HOME/.cargo/bin"
+        "$HOME/.cargo/bin/cargo-nextest" --version
     - name: make test all
       if: ${{ !contains(github.event.inputs.skiptests, 'modules') }}
       run: make test all
