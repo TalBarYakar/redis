@@ -570,6 +570,23 @@ int dictResizeAllowed(size_t moreMem, double usedRatio) {
     }
 }
 
+/* dbDictType prefetch callbacks.
+ * The main keyspace stores a kvobj as the entry's "stored key" (no_value=1).
+ * The state machine in memory_prefetch.c calls these hooks to:
+ *  - Bring the kvobj head into L1 before keyCompare runs (only useful when
+ *    the entry holds an out-of-line pointer; embedded kvobjs are already
+ *    in cache from the entry prefetch).
+ *  - Bring kv->ptr into L1 for RAW strings, since addReplyBulk reads it
+ *    immediately after the lookup. */
+static void *dbDictPrefetchEntryKey(const dictEntry *de) {
+    return dictEntryIsKey(de) ? NULL : dictGetKey(de);
+}
+
+static void *dbDictPrefetchEntryValue(const dictEntry *de) {
+    kvobj *kv = dictGetKey(de);
+    return (kv->type == OBJ_STRING && kv->encoding == OBJ_ENCODING_RAW) ? kv->ptr : NULL;
+}
+
 /* Generic hash table type where keys are Redis Objects, Values
  * dummy pointers. */
 dictType objectKeyPointerValueDictType = {
@@ -633,6 +650,8 @@ dictType dbDictType = {
     .no_value = 1,          /* keys and values are unified (kvobj) */
     .keys_are_odd = 0,      /* simple kvobj (robj) struct */
     .keyFromStoredKey = kvGetKey,    /* get key from stored-key */
+    .prefetchEntryKey = dbDictPrefetchEntryKey,
+    .prefetchEntryValue = dbDictPrefetchEntryValue,
 };
 
 /* Db->expires */
@@ -1059,7 +1078,8 @@ static inline clientMemUsageBucket *getMemUsageBucket(size_t mem) {
  */
 void updateClientMemoryUsage(client *c) {
     serverAssert(c->conn);
-    size_t mem = getClientMemoryUsage(c, NULL);
+    size_t mem = getClientMemoryUsage(c);
+
     int type = getClientType(c);
     /* Now that we have the memory used by the client, remove the old
      * value from the old category, and add it back. */
@@ -1126,6 +1146,20 @@ int updateClientMemUsageAndBucket(client *c) {
 
     if (!allow_eviction) {
         return 0;
+    }
+
+    /* Include unshared reply bytes in the client's memory usage for eviction.
+     * Walking the reply buffer is costly, so skip the scan when its outcome
+     * cannot affect bucket placement: since 0 <= unshared <= shared, if both
+     * endpoints map to the same bucket the cached value is reused. */
+    if (c->reply_bytes_shared > 0) {
+        size_t lower_bound = getClientMemoryUsage(c) - c->reply_bytes_unshared;
+        size_t upper_bound = lower_bound + c->reply_bytes_shared;
+        if (getMemUsageBucket(lower_bound) != getMemUsageBucket(upper_bound))
+            updateClientUnsharedReplyBytes(c);
+    } else {
+        /* No shared bytes: clear any stale cached unshared. */
+        c->reply_bytes_unshared = 0;
     }
 
     /* Update client memory usage. */
@@ -1474,6 +1508,22 @@ void cronUpdateMemoryStats(void) {
                                                 &server.cron_malloc_stats.lua_allocator_resident,
                                                 &server.cron_malloc_stats.lua_allocator_frag_smallbins_bytes);
         }
+        /* Publish the just-measured (Lua-arena-subtracted) fragmentation
+         * values into the defrag-side tick-local cache so
+         * computeDefragCycles() later this tick can skip its own
+         * duplicate jemalloc measurement. Mirrors
+         * getAllocatorFragmentation()'s Lua subtraction so the cached
+         * value matches the fall-through real measurement exactly.
+         * Publishing with allocated==0 leaves the cache invalid
+         * (sentinel set inside the publish) — defrag should decide on
+         * real data or none. */
+        size_t frag  = server.cron_malloc_stats.allocator_frag_smallbins_bytes;
+        size_t alloc = server.cron_malloc_stats.allocator_allocated;
+        if (alloc > 0 && server.lua_arena != UINT_MAX) {
+            frag  -= server.cron_malloc_stats.lua_allocator_frag_smallbins_bytes;
+            alloc -= server.cron_malloc_stats.lua_allocator_allocated;
+        }
+        defragFragCachePut(frag, alloc);
         /* in case the allocator isn't providing these stats, fake them so that
          * fragmentation info still shows some (inaccurate metrics) */
         if (!server.cron_malloc_stats.allocator_resident)
@@ -2340,6 +2390,7 @@ void initServerConfig(void) {
                                       updated later after loading the config.
                                       This value may be used before the server
                                       is initialized. */
+    server.defrag_frag_cache.cronloops = -1; /* Mark the defrag fragmentation cache as stale */
     server.timezone = getTimeZone(); /* Initialized by tzset(). */
     server.configfile = NULL;
     server.executable = NULL;
@@ -2365,6 +2416,7 @@ void initServerConfig(void) {
     server.aof_rewrite_base_size = 0;
     server.aof_rewrite_scheduled = 0;
     server.aof_flush_sleep = 0;
+    server.debug_fork_fail = 0;
     server.aof_last_fsync = time(NULL) * 1000;
     server.aof_cur_timestamp = 0;
     atomicSet(server.aof_bio_fsync_status,C_OK);
@@ -2861,8 +2913,8 @@ void resetServerStats(void) {
     server.stat_sync_partial_ok = 0;
     server.stat_sync_partial_err = 0;
     for (j = 0; j < IO_THREADS_MAX_NUM; j++) {
-        atomicSet(server.stat_io_reads_processed[j], 0);
-        atomicSet(server.stat_io_writes_processed[j], 0);
+        atomicSet(IOThreads[j].io_reads_processed, 0);
+        atomicSet(IOThreads[j].io_writes_processed, 0);
     }
     atomicSet(server.stat_client_qbuf_limit_disconnections, 0);
     server.stat_client_outbuf_limit_disconnections = 0;
@@ -2938,15 +2990,20 @@ void initServer(void) {
     server.errors = raxNew();
     server.errors_enabled = 1;
     server.execution_nesting = 0;
+    server.firing_keyed_post_notif_jobs = 0;
+    server.fire_keyed_jobs_between_subcommands = 0;
+    server.in_keyspace_notification = 0;
     server.clients = listCreate();
-    server.clients_index = raxNew();
+    server.clients_index = raxNewEx(0, NULL, sizeof(uint64_t));
     server.clients_to_close = listCreate();
     server.slaves = listCreate();
     server.monitors = listCreate();
     server.clients_pending_write = listCreate();
     server.clients_pending_read = listCreate();
     server.clients_with_pending_ref_reply = listCreate();
-    server.clients_timeout_table = raxNew();
+    /* clients_timeout_table key = 8 bytes BE mstime + 8 bytes client ID
+     * (see CLIENT_ST_KEYLEN / encodeTimeoutKey in timeout.c). */
+    server.clients_timeout_table = raxNewEx(0, NULL, sizeof(uint64_t) * 2);
     server.replication_allowed = 1;
     server.slaveseldb = -1; /* Force to emit the first SELECT command. */
     server.unblocked_clients = listCreate();
@@ -5265,6 +5322,7 @@ void addReplyFlagsForCommand(client *c, struct redisCommand *cmd) {
         {CMD_MOVABLE_KEYS,      "movablekeys"},
         {CMD_ALLOW_BUSY,        "allow_busy"},
         /* {CMD_TOUCHES_ARBITRARY_KEYS,  "TOUCHES_ARBITRARY_KEYS"}, Hidden on purpose */
+        {CMD_SCRIPT_RUNNER,     "script_runner"},
         {0,NULL}
     };
     addReplyCommandFlags(c, cmd->flags, flagNames);
@@ -6470,7 +6528,9 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
             "mem_total_replication_buffers:%zu\r\n", server.repl_buffer_mem + server.repl_full_sync_buffer.mem_used,
             "mem_replica_full_sync_buffer:%zu\r\n", server.repl_full_sync_buffer.mem_used,
             "mem_clients_slaves:%zu\r\n", mh->clients_slaves,
-            "mem_clients_normal:%zu\r\n", mh->clients_normal,
+            "mem_clients_normal:%zu\r\n", mh->clients_normal, /* actual memory usage (includes unshared memory, excludes shared memory) */
+            "mem_clients_normal_shared:%zu\r\n", mh->clients_normal_shared, /* shared memory (not solely owned by this client) */
+            "mem_clients_normal_unshared:%zu\r\n", mh->clients_normal_unshared, /* unshared memory (solely owned by this client) */
             "mem_cluster_slot_migration_output_buffer:%zu\r\n", mh->asm_migrate_output_buffer,
             "mem_cluster_slot_migration_input_buffer:%zu\r\n", mh->asm_import_input_buffer,
             "mem_cluster_slot_migration_input_buffer_peak:%zu\r\n", asmGetPeakSyncBufferSize(),
@@ -6587,8 +6647,8 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
         info = sdscatprintf(info, "# Threads\r\n");
         long long reads, writes;
         for (j = 0; j < server.io_threads_num; j++) {
-            atomicGet(server.stat_io_reads_processed[j], reads);
-            atomicGet(server.stat_io_writes_processed[j], writes);
+            atomicGet(IOThreads[j].io_reads_processed, reads);
+            atomicGet(IOThreads[j].io_writes_processed, writes);
             info = sdscatprintf(info, "io_thread_%d:clients=%d,reads=%lld,writes=%lld\r\n",
                                        j, server.io_threads_clients_num[j], reads, writes);
             stat_total_reads_processed += reads;
@@ -6625,10 +6685,10 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
         if (!stat_io_ops_processed_calculated) {
             long long reads, writes;
             for (j = 0; j < server.io_threads_num; j++) {
-                atomicGet(server.stat_io_reads_processed[j], reads);
+                atomicGet(IOThreads[j].io_reads_processed, reads);
                 stat_total_reads_processed += reads;
                 if (j != 0) stat_io_reads_processed += reads; /* Skip the main thread */
-                atomicGet(server.stat_io_writes_processed[j], writes);
+                atomicGet(IOThreads[j].io_writes_processed, writes);
                 stat_total_writes_processed += writes;
                 if (j != 0) stat_io_writes_processed += writes; /* Skip the main thread */
             }
@@ -7368,18 +7428,36 @@ void closeChildUnusedResourceAfterFork(void) {
 
 /* purpose is one of CHILD_TYPE_ types */
 int redisFork(int purpose) {
-    if (isMutuallyExclusiveChildType(purpose)) {
-        if (hasActiveChildProcess()) {
-            errno = EEXIST;
-            return -1;
-        }
+    /* Guards against re-entrant RM_Fork from a FORK_CHILD_PRE event handler. */
+    static int fork_in_progress = 0;
 
-        openChildInfoPipe();
+    if (fork_in_progress ||
+        (isMutuallyExclusiveChildType(purpose) && hasActiveChildProcess()))
+    {
+        errno = EEXIST;
+        return -1;
     }
+    fork_in_progress = 1;
+
+    /* Let multi-threaded modules reach a fork-safe point: a background thread
+     * holding a lock (e.g. the allocator lock) at fork() time would deadlock the
+     * child. Handlers run synchronously and resume on FORK_CHILD_BORN/CANCELLED */
+    moduleFireServerEvent(REDISMODULE_EVENT_FORK_CHILD,
+                          REDISMODULE_SUBEVENT_FORK_CHILD_PRE,
+                          NULL);
+
+    if (isMutuallyExclusiveChildType(purpose))
+        openChildInfoPipe();
 
     int childpid;
     long long start = ustime();
-    if ((childpid = fork()) == 0) {
+    if (server.debug_fork_fail) { /* used by tests */
+        errno = EAGAIN;
+        childpid = -1;
+    } else {
+        childpid = fork();
+    }
+    if (childpid == 0) {
         /* Child.
          *
          * The order of setting things up follows some reasoning:
@@ -7404,6 +7482,12 @@ int redisFork(int purpose) {
         if (childpid == -1) {
             int fork_errno = errno;
             if (isMutuallyExclusiveChildType(purpose)) closeChildInfoPipe();
+            /* The fork we prepared for did not happen; let modules resume the
+             * background threads they quiesced on FORK_CHILD_PRE. */
+            moduleFireServerEvent(REDISMODULE_EVENT_FORK_CHILD,
+                                  REDISMODULE_SUBEVENT_FORK_CHILD_CANCELLED,
+                                  NULL);
+            fork_in_progress = 0;
             errno = fork_errno;
             return -1;
         }
@@ -7436,6 +7520,7 @@ int redisFork(int purpose) {
                               REDISMODULE_SUBEVENT_FORK_CHILD_BORN,
                               NULL);
     }
+    fork_in_progress = 0;
     return childpid;
 }
 
@@ -8096,6 +8181,10 @@ int main(int argc, char **argv) {
         sdsfree(options);
     }
     if (server.sentinel_mode) sentinelCheckConfigFile();
+
+    /* Reserve dedicated used_memory slots for main + IO threads (single-writer
+     * fast path). See zmalloc_reserve_thread_slots(). */
+    zmalloc_reserve_thread_slots(server.io_threads_num);
 
     /* Do system checks */
 #ifdef __linux__

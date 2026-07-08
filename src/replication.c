@@ -246,7 +246,7 @@ void createReplicationBacklog(void) {
     server.repl_backlog = zmalloc(sizeof(replBacklog));
     server.repl_backlog->ref_repl_buf_node = NULL;
     server.repl_backlog->unindexed_count = 0;
-    server.repl_backlog->blocks_index = raxNew();
+    server.repl_backlog->blocks_index = raxNewEx(0, NULL, sizeof(uint64_t));
     server.repl_backlog->histlen = 0;
     /* We don't have any data inside our buffer, but virtually the first
      * byte we have is the next byte that will be generated for the
@@ -307,7 +307,7 @@ void createReplicationBacklogIndex(listNode *ln) {
  * setting offset starts from 0 when master restart. */
 void rebaseReplicationBuffer(long long base_repl_offset) {
     raxFree(server.repl_backlog->blocks_index);
-    server.repl_backlog->blocks_index = raxNew();
+    server.repl_backlog->blocks_index = raxNewEx(0, NULL, sizeof(uint64_t));
     server.repl_backlog->unindexed_count = 0;
 
     listIter li;
@@ -2251,6 +2251,11 @@ void replicationAttachToNewMaster(void) {
 /* Asynchronously read the SYNC payload we receive from a master */
 #define REPL_MAX_WRITTEN_BEFORE_FSYNC (1024*1024*8) /* 8 MB */
 void readSyncBulkPayload(connection *conn) {
+    /* During full sync, the functions engine is freed right before loading
+     * the RDB. To avoid this happening while a function is still running,
+     * delay full sync processing until it finishes. */
+    if (isInsideYieldingLongCommand()) return;
+
     char buf[PROTO_IOBUF_LEN];
     ssize_t nread, readlen, nwritten;
     int use_diskless_load = useDisklessLoad();
@@ -4005,7 +4010,7 @@ static void rdbChannelReplDataBufClear(void) {
 static int replDataBufReadIntoLastBlock(connection *conn, replDataBuf *buf,
                                     void (*error_handler)(connection *conn))
 {
-    atomicIncr(server.stat_io_reads_processed[IOTHREAD_MAIN_THREAD_ID], 1);
+    atomicIncr(IOThreads[IOTHREAD_MAIN_THREAD_ID].io_reads_processed, 1);
 
     replDataBufBlock *block = listNodeValue(listLast(buf->blocks));
     serverAssert(block && block->size > block->used);
@@ -4528,7 +4533,7 @@ void replicationCacheMaster(client *c) {
     if (c->flags & CLIENT_MULTI) discardTransaction(c);
     listEmpty(c->reply);
     c->sentlen = 0;
-    c->reply_bytes = 0;
+    c->reply_bytes = c->reply_bytes_shared = c->reply_bytes_unshared = 0;
     c->bufpos = 0;
     resetClient(c, -1);
     resetClientQbufState(c);

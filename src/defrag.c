@@ -754,6 +754,32 @@ void defragSet(defragKeysCtx *ctx, kvobj *ob) {
         ob->ptr = newd;
 }
 
+/* Arrays can be expensive to defrag in one shot because they may contain many
+ * independently allocated slices. Small arrays are defragmented immediately,
+ * while large arrays are queued for later and processed one slice per step. */
+void defragArray(defragKeysCtx *ctx, kvobj *ob) {
+    serverAssert(ob->type == OBJ_ARRAY);
+    /* Maybe arCount() is not the best possible value to check against
+     * server.active_defrag_max_scan_fields, also because anyway when we
+     * defrag incrementally, we defrag a since slice per call. Yet it makes
+     * sense in a non very obvious way, for several reasons:
+     *
+     * 1. If the array is very sparse, it is an upper bound to the max
+     *    number of slices it is composed to.
+     * 2. If the array is dense, we will scan in the default case at most 4096
+     *    entries, and the default defrag limit for max scans is 1000. They
+     *    are kinda comparable numbers.
+     * 3. In case of a highly sparse array with huge indexes, in superdir mode,
+     *    yet the super blocks are going to be at max arCount().
+     *
+     * So regardless of the fact we later will defrag in slice units, this
+     * is a good trigger for the one shot or incremental selection. */
+    if (arCount(ob->ptr) > server.active_defrag_max_scan_fields)
+        defragLater(ctx, ob);
+    else
+        ob->ptr = arDefrag(ob->ptr, activeDefragAlloc);
+}
+
 /* Defrag callback for radix tree iterator, called for each node,
  * used in order to defrag the nodes allocations. */
 int defragRaxNode(raxNode **noderef, void *privdata) {
@@ -801,7 +827,7 @@ int scanLaterStreamListpacks(robj *ob, unsigned long *cursor, monotime endtime) 
     while (raxNext(&ri)) {
         void *newdata = activeDefragAlloc(ri.data);
         if (newdata)
-            raxSetData(ri.node, ri.data=newdata);
+            raxIteratorSetData(&ri, newdata);
         server.stat_active_defrag_scanned++;
         if (++iterations > 128) {
             if (getMonotonicUs() > endtime) {
@@ -850,7 +876,7 @@ void defragRadixTree(rax **raxref, int defrag_data, raxDefragFunction *element_c
         if (defrag_data && !newdata)
             newdata = activeDefragAlloc(ri.data);
         if (newdata)
-            raxSetData(ri.node, ri.data=newdata);
+            raxIteratorSetData(&ri, newdata);
     }
     raxStop(&ri);
 }
@@ -1163,6 +1189,7 @@ void defragKey(defragKeysCtx *ctx, dictEntry *de, dictEntryLink link) {
         }
     } else if (ob->type == OBJ_STREAM) {
         defragStream(ctx, ob);
+#ifdef ENABLE_GCRA
     } else if (ob->type == OBJ_GCRA) {
         /* GCRA object is just an allocation to a long long value */
 #if UINTPTR_MAX == 0xffffffff
@@ -1170,8 +1197,11 @@ void defragKey(defragKeysCtx *ctx, dictEntry *de, dictEntryLink link) {
         if ((newptr = activeDefragAlloc(ptr)))
             ob->ptr = newptr;
 #endif
+#endif
     } else if (ob->type == OBJ_MODULE) {
         defragModule(ctx,db, ob);
+    } else if (ob->type == OBJ_ARRAY) {
+        defragArray(ctx, ob);
     } else {
         serverPanic("Unknown object type");
     }
@@ -1288,6 +1318,10 @@ int defragLaterItem(kvobj *ob, unsigned long *cursor, monotime endtime, int dbid
             robj keyobj;
             initStaticStringObject(keyobj, kvobjGetKey(ob));
             return moduleLateDefrag(&keyobj, ob, cursor, endtime, dbid);
+        } else if (ob->type == OBJ_ARRAY) {
+            redisArray *ar = ob->ptr;
+            *cursor = arDefragIncremental(&ar, *cursor, activeDefragAlloc);
+            ob->ptr = ar;
         } else {
             *cursor = 0; /* object type/encoding may have changed since we schedule it for later */
         }
@@ -1352,10 +1386,38 @@ static doneStatus defragLaterStep(void *ctx, monotime endtime) {
 #define INTERPOLATE(x, x1, x2, y1, y2) ( (y1) + ((x)-(x1)) * ((y2)-(y1)) / ((x2)-(x1)) )
 #define LIMIT(y, min, max) ((y)<(min)? min: ((y)>(max)? max: (y)))
 
+/* Publish (Lua-subtracted) frag values with the current cronloops stamp.
+ * See struct defragFragCache in server.h for the cache rationale. */
+void defragFragCachePut(size_t frag_bytes, size_t allocated) {
+    if (allocated == 0) return;          /* avoid divide-by-zero */
+    server.defrag_frag_cache.frag_pct =
+        (float)((double)frag_bytes / (double)allocated * 100.0);
+    server.defrag_frag_cache.frag_bytes = frag_bytes;
+    server.defrag_frag_cache.cronloops = server.cronloops;
+}
+
+int defragFragCacheTake(float *out_frag_pct, size_t *out_frag_bytes) {
+    if (server.defrag_frag_cache.cronloops != server.cronloops)
+        return 0;
+    server.defrag_frag_cache.hits++;
+    *out_frag_pct   = server.defrag_frag_cache.frag_pct;
+    *out_frag_bytes = server.defrag_frag_cache.frag_bytes;
+    return 1;
+}
+
 /* decide if defrag is needed, and at what CPU effort to invest in it */
 void computeDefragCycles(void) {
+    /* Try the tick-local cache first.  On hit, (frag_pct, frag_bytes)
+     * are populated from the value the producer published earlier this
+     * cron tick — saving a redundant getAllocatorFragmentation() call.
+     * On miss (cache stale, cold start, or invalidated by a previous
+     * consume), fall back to a fresh measurement.  The single threshold
+     * check below operates on whichever source provided the values. */
     size_t frag_bytes;
-    float frag_pct = getAllocatorFragmentation(&frag_bytes);
+    float frag_pct;
+    if (!defragFragCacheTake(&frag_pct, &frag_bytes)) {
+        frag_pct = getAllocatorFragmentation(&frag_bytes);
+    }
     /* If we're not already running, and below the threshold, exit. */
     if (!server.active_defrag_running) {
         if(frag_pct < server.active_defrag_threshold_lower || frag_bytes < server.active_defrag_ignore_bytes)
@@ -1978,6 +2040,15 @@ robj *activeDefragStringOb(robj *ob) {
 }
 
 void defragWhileBlocked(void) {
+}
+
+void defragFragCachePut(size_t frag_bytes, size_t allocated) {
+    UNUSED(frag_bytes); UNUSED(allocated);
+}
+
+int defragFragCacheTake(float *out_frag_pct, size_t *out_frag_bytes) {
+    UNUSED(out_frag_pct); UNUSED(out_frag_bytes);
+    return 0;
 }
 
 #endif
