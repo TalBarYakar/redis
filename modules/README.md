@@ -36,7 +36,7 @@ For versions lower than 8.10, see the
 
 ```sh
 cd redis-<version>
-export BUILD_TLS=yes INSTALL_RUST_TOOLCHAIN=yes
+export BUILD_TLS=yes
 make -j "$(nproc)" all
 ```
 
