@@ -95,6 +95,15 @@ endif
 # No get_source dependency: stripping -Werror only touches sources already on
 # disk, so it must never trigger a clone. The `all` path clones separately via
 # its prepare_source prerequisite; a module with no src/ is simply skipped here.
+#
+# When handle-werrors is NOT the invoked goal (i.e. it runs as a prerequisite
+# of `all`), order it after prepare_source — under `make -j` the two would
+# otherwise race and the -Werror strip could run before the clones finish.
+# Invoked directly (as scripts/build.sh does), it keeps no clone-triggering
+# dependency.
+ifeq ($(filter handle-werrors,$(MAKECMDGOALS)),)
+handle-werrors: | prepare_source
+endif
 handle-werrors:
 ifeq ($(DISABLE_WERRORS),yes)
 	@echo "Disabling -Werror for all modules"
