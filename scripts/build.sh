@@ -47,8 +47,13 @@ fi
 case "${INSTALL_RUST_TOOLCHAIN:-}" in
   yes|1|true)
     echo
-    echo "==> Installing Rust toolchain (INSTALL_RUST_TOOLCHAIN=yes)"
-    "$MAKE_BIN" -C "$REPO_ROOT/modules" install-rust INSTALL_RUST_TOOLCHAIN=yes
+    if [ "$(uname -s)" = "Linux" ]; then
+      echo "==> Installing Rust toolchain (INSTALL_RUST_TOOLCHAIN=yes)"
+      "$MAKE_BIN" -C "$REPO_ROOT/modules" install-rust INSTALL_RUST_TOOLCHAIN=yes
+    else
+      echo "==> INSTALL_RUST_TOOLCHAIN=yes skipped: the bundled Rust installer is Linux-only."
+      echo "    Install Rust manually on $(uname -s) (see the macOS section in README.md)."
+    fi
     ;;
 esac
 
