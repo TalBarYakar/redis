@@ -3,6 +3,9 @@ name: Post-Release Automation
 on:
   release:
     types: [published]
+  push:
+    tags:
+      - '*'
 
 jobs:
   extract-release-info:
@@ -18,11 +21,17 @@ jobs:
       - name: Extract and validate release information
         id: release-info
         env:
-          TAG_NAME: ${{ github.event.release.tag_name }}
+          TAG_NAME: ${{ github.event.release.tag_name || github.ref_name }}
           GH_TOKEN: ${{ github.token }}
         run: |
           echo "tag_name=${TAG_NAME}" >> $GITHUB_OUTPUT
           echo "Release tag: ${TAG_NAME}"
+
+          if [[ "${{ github.event_name }}" != "release" ]]; then
+            echo "release_type=non-latest" >> $GITHUB_OUTPUT
+            echo "Tag push (non-formal build): ${TAG_NAME}"
+            exit 0
+          fi
 
           LATEST_TAG=$(gh release view --json tagName --jq '.tagName')
           echo "Latest release tag(from gh release): ${LATEST_TAG}"
@@ -98,6 +107,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          if [[ "${{ github.event_name }}" != "release" ]]; then
+            gh release view "$TAG_NAME" >/dev/null 2>&1 || \
+              gh release create "$TAG_NAME" \
+                --prerelease \
+                --title "$TAG_NAME" \
+                --notes "Non-formal build for tag $TAG_NAME"
+          fi
+
           gh release upload "$TAG_NAME" \
             /tmp/redis-full.tar.gz \
             --clobber
