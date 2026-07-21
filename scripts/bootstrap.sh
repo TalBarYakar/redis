@@ -84,10 +84,11 @@ for name in $selected; do
     failed="$failed $name"
     continue
   fi
-  # In check-deps mode, never invoke a module whose bootstrap can't honor
-  # CHECK_DEPS — it would install for real, defeating the whole point.
-  # Support is advertised by referencing CHECK_DEPS anywhere under .install/.
-  if [ "$CHECK_DEPS" = 1 ] && ! grep -rq CHECK_DEPS "modules/$name/src/.install" 2>/dev/null; then
+  # In check-deps mode, never invoke a module whose bootstrap can't honor it —
+  # it would install for real. Support is advertised by referencing the shared
+  # contract (DEPS_REPORT_FILE) anywhere under .install/ — the name-based
+  # modules and redisearch's verify_build_deps.sh all write to it.
+  if [ "$CHECK_DEPS" = 1 ] && ! grep -rq DEPS_REPORT_FILE "modules/$name/src/.install" 2>/dev/null; then
     echo "    !! SKIP: $name does not support check-deps (would install for real)"
     continue
   fi
