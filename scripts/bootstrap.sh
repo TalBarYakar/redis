@@ -19,21 +19,24 @@ cd "$REPO_ROOT"
 
 MAKE_BIN="${MAKE:-make}"
 
-# check-deps: report which prerequisites are already installed vs missing,
-# WITHOUT installing anything. Strip the flag out of the positional args
-# (so it isn't mistaken for a module name) and pass it to each module's
-# bootstrap via the CHECK_DEPS env var.
+# Non-installing modes, passed to each module's bootstrap via env var:
+#   check-deps : report which prerequisites are installed vs missing
+#   dry-run    : print the install commands that WOULD run
+# Note: use the bare tokens (not --dry-run) — make consumes `--`-flags itself.
+# Strip the flag out of the positional args so it isn't taken for a module.
 CHECK_DEPS=0
+DRY_RUN=0
 _args=""
 for _a in "$@"; do
   case "$_a" in
     check-deps|--check-deps|--deps-check) CHECK_DEPS=1 ;;
+    dry-run|--dry-run-deps|DRY-RUN)       DRY_RUN=1 ;;
     *) _args="$_args $_a" ;;
   esac
 done
 # shellcheck disable=SC2086
 set -- $_args
-export CHECK_DEPS
+export CHECK_DEPS DRY_RUN
 
 # Ensure sudo + python3 exist when running as root inside a slim container,
 # matching the legacy Makefile recipe behaviour.
@@ -60,6 +63,8 @@ fi
 
 if [ "$CHECK_DEPS" = 1 ]; then
   echo "==> Checking deps for: $selected (no installation)"
+elif [ "$DRY_RUN" = 1 ]; then
+  echo "==> Dry-run for: $selected (printing install commands, no installation)"
 else
   echo "==> Installing deps for: $selected"
 fi
@@ -75,11 +80,15 @@ for name in $selected; do
     failed="$failed $name"
     continue
   fi
-  # In check-deps mode, never invoke a module whose bootstrap can't honor
-  # CHECK_DEPS — it would install for real, defeating the whole point.
-  # Support is advertised by referencing CHECK_DEPS anywhere under .install/.
+  # In a non-installing mode, never invoke a module whose bootstrap can't
+  # honor it — it would install for real, defeating the whole point. Support
+  # is advertised by referencing the env var anywhere under .install/.
   if [ "$CHECK_DEPS" = 1 ] && ! grep -rq CHECK_DEPS "modules/$name/src/.install" 2>/dev/null; then
     echo "    !! SKIP: $name does not support check-deps (would install for real)"
+    continue
+  fi
+  if [ "$DRY_RUN" = 1 ] && ! grep -rq DRY_RUN "modules/$name/src/.install" 2>/dev/null; then
+    echo "    !! SKIP: $name does not support dry-run (would install for real)"
     continue
   fi
   # Per-module convention: the inner target is still called `bootstrap` —
@@ -115,6 +124,9 @@ fi
 if [ "$CHECK_DEPS" = 1 ]; then
   echo "==> Deps check complete for: $selected (nothing installed)"
   echo "    Run 'make bootstrap' to install anything reported as not installed."
+elif [ "$DRY_RUN" = 1 ]; then
+  echo "==> Dry-run complete for: $selected (nothing installed)"
+  echo "    Run 'make bootstrap' to actually run the commands above."
 else
   echo "==> Deps install complete for: $selected"
   echo "    Next: 'make build [<name>]' then 'make test [<name>]' or 'make run'."
