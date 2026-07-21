@@ -129,18 +129,30 @@ if [ "$CHECK_DEPS" = 1 ]; then
     echo "==> Deps check: no modules reported (none support check-deps)"
     exit 0
   fi
-  installed=$(sort -u "$DEPS_REPORT_FILE" | awk '$1=="ok"{print $2}')
+  # ok + opt_ok both count as installed; only required `missing` fails the
+  # check. `opt_missing` (tests/coverage/debug) is reported separately.
+  installed=$(sort -u "$DEPS_REPORT_FILE" | awk '$1=="ok"||$1=="opt_ok"{print $2}')
   missing=$(sort -u "$DEPS_REPORT_FILE"   | awk '$1=="missing"{print $2}')
+  opt_missing=$(sort -u "$DEPS_REPORT_FILE" | awk '$1=="opt_missing"{print $2}')
+  # Required wins across modules: if ANY module needs a package (missing), it
+  # stays in the required list even if another module marked it optional.
+  if [ -n "$missing" ] && [ -n "$opt_missing" ]; then
+    opt_missing=$(printf '%s\n' "$opt_missing" | grep -vxF "$missing")
+  fi
   if [ -z "$missing" ];   then n_missing=0; else n_missing=$(printf '%s\n' "$missing"   | wc -l | tr -d ' '); fi
   if [ -z "$installed" ]; then n_ok=0;      else n_ok=$(printf '%s\n' "$installed" | wc -l | tr -d ' '); fi
   total=$((n_ok + n_missing))
-  if [ -t 1 ]; then RED="$(printf '\033[1;31m')"; GRN="$(printf '\033[1;32m')"; RST="$(printf '\033[0m')"; else RED=""; GRN=""; RST=""; fi
+  if [ -t 1 ]; then RED="$(printf '\033[1;31m')"; GRN="$(printf '\033[1;32m')"; YLW="$(printf '\033[1;33m')"; RST="$(printf '\033[0m')"; else RED=""; GRN=""; YLW=""; RST=""; fi
   echo "==> Dependency check across: $selected — nothing installed"
   if [ "$n_missing" -gt 0 ]; then
     echo "${RED}NOT INSTALLED ($n_missing):${RST}"
     printf '%s\n' "$missing" | while IFS= read -r p; do [ -n "$p" ] && echo "${RED}    $p${RST}"; done
   else
     echo "${GRN}not installed: (none)${RST}"
+  fi
+  if [ -n "$opt_missing" ]; then
+    echo "${YLW}OPTIONAL, not installed (tests/coverage/debug — won't fail the check):${RST}"
+    printf '%s\n' "$opt_missing" | while IFS= read -r p; do [ -n "$p" ] && echo "${YLW}    $p${RST}"; done
   fi
   if [ "${VERBOSE:-0}" = 1 ]; then
     echo "${GRN}installed:${RST}"
