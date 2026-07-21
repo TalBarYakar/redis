@@ -64,6 +64,15 @@ else
   echo "==> Installing deps for: $selected"
 fi
 export PIP_BREAK_SYSTEM_PACKAGES=1
+
+# check-deps: modules append "ok|missing <pkg>" records here instead of each
+# printing its own list; we print one deduped union across all modules below.
+if [ "$CHECK_DEPS" = 1 ]; then
+  DEPS_REPORT_FILE="$(mktemp)"
+  export DEPS_REPORT_FILE
+  trap 'rm -f "$DEPS_REPORT_FILE"' EXIT
+fi
+
 failed=""
 for name in $selected; do
   echo
@@ -113,8 +122,33 @@ if [ -n "$failed" ]; then
   exit 1
 fi
 if [ "$CHECK_DEPS" = 1 ]; then
-  echo "==> Deps check complete for: $selected (nothing installed)"
-  echo "    Run 'make bootstrap' to install anything reported as not installed."
+  # One deduped union across every checked module. A package's installed state
+  # is host-global, so dedup by name is safe (no per-module conflicts).
+  if [ ! -s "$DEPS_REPORT_FILE" ]; then
+    echo "==> Deps check: no modules reported (none support check-deps)"
+    exit 0
+  fi
+  installed=$(sort -u "$DEPS_REPORT_FILE" | awk '$1=="ok"{print $2}')
+  missing=$(sort -u "$DEPS_REPORT_FILE"   | awk '$1=="missing"{print $2}')
+  if [ -z "$missing" ];   then n_missing=0; else n_missing=$(printf '%s\n' "$missing"   | wc -l | tr -d ' '); fi
+  if [ -z "$installed" ]; then n_ok=0;      else n_ok=$(printf '%s\n' "$installed" | wc -l | tr -d ' '); fi
+  total=$((n_ok + n_missing))
+  if [ -t 1 ]; then RED="$(printf '\033[1;31m')"; GRN="$(printf '\033[1;32m')"; RST="$(printf '\033[0m')"; else RED=""; GRN=""; RST=""; fi
+  echo "==> Dependency check across: $selected — nothing installed"
+  if [ "$n_missing" -gt 0 ]; then
+    echo "${RED}NOT INSTALLED ($n_missing):${RST}"
+    printf '%s\n' "$missing" | while IFS= read -r p; do [ -n "$p" ] && echo "${RED}    $p${RST}"; done
+  else
+    echo "${GRN}not installed: (none)${RST}"
+  fi
+  if [ "${VERBOSE:-0}" = 1 ]; then
+    echo "${GRN}installed:${RST}"
+    printf '%s\n' "$installed" | while IFS= read -r p; do [ -n "$p" ] && echo "${GRN}    $p${RST}"; done
+  else
+    echo "${GRN}installed: $n_ok/$total (set VERBOSE=1 to list)${RST}"
+  fi
+  echo "    Run 'make bootstrap' to install anything not installed."
+  [ "$n_missing" -eq 0 ] || exit 1
 else
   echo "==> Deps install complete for: $selected"
   echo "    Next: 'make build [<name>]' then 'make test [<name>]' or 'make run'."
