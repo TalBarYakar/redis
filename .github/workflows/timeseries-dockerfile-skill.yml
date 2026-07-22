@@ -1,0 +1,262 @@
+name: TimeSeries Dockerfile Skill
+
+on:
+  pull_request:
+    branches:
+      - unstable
+    paths:
+      - '.github/workflows/timeseries-dockerfile-skill.yml'
+      - 'scripts/ci-test-redis-build-skill.sh'
+      - 'Makefile'
+      - 'scripts/**'
+      - 'modules/**'
+      - 'src/**'
+  workflow_dispatch:
+    inputs:
+      use_repo:
+        description: 'repo owner and name'
+        default: 'TalBarYakar/redis'
+      use_git_ref:
+        description: 'git branch, tag, or sha to test'
+        default: 'tal.ba/feat/add_redis_docker_files'
+      redis_port:
+        description: 'redis port used by smoke tests'
+        default: '6379'
+
+jobs:
+  test:
+    name: ${{ matrix.os.dockerfile }} (${{ matrix.os.osnick }}, ${{ matrix.arch.name }})
+    runs-on: ${{ matrix.arch.runner }}
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - name: x86
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - name: arm
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+        os:
+          - dockerfile: Dockerfile.alma10
+            image: almalinux:10
+            osnick: alma10
+          - dockerfile: Dockerfile.alma8
+            image: almalinux:8
+            osnick: alma8
+          - dockerfile: Dockerfile.alma9
+            image: almalinux:9
+            osnick: alma9
+          - dockerfile: Dockerfile.alpine
+            image: alpine:3
+            osnick: alpine
+          - dockerfile: Dockerfile.amazonlinux2023
+            image: amazonlinux:2023
+            osnick: amazonlinux2023
+          - dockerfile: Dockerfile.azurelinux3
+            image: mcr.microsoft.com/azurelinux/base/core:3.0
+            osnick: azurelinux3
+          - dockerfile: Dockerfile.bionic
+            image: ubuntu:18.04
+            osnick: bionic
+          - dockerfile: Dockerfile.bookworm
+            image: debian:bookworm
+            osnick: bookworm
+          - dockerfile: Dockerfile.focal
+            image: ubuntu:20.04
+            osnick: focal
+          - dockerfile: Dockerfile.jammy
+            image: ubuntu:22.04
+            osnick: jammy
+          - dockerfile: Dockerfile.noble
+            image: ubuntu:24.04
+            osnick: noble
+          - dockerfile: Dockerfile.resolute
+            image: ubuntu:26.04
+            osnick: resolute
+          - dockerfile: Dockerfile.rocky10
+            image: quay.io/rockylinux/rockylinux:10
+            osnick: rocky10
+          - dockerfile: Dockerfile.rocky8
+            image: rockylinux:8
+            osnick: rocky8
+          - dockerfile: Dockerfile.rocky9
+            image: rockylinux:9
+            osnick: rocky9
+          - dockerfile: Dockerfile.sandbox
+            image: ubuntu:22.04
+            osnick: jammy
+          - dockerfile: Dockerfile.trixie
+            image: debian:trixie
+            osnick: trixie
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          repository: ${{ github.event.inputs.use_repo || github.repository }}
+          ref: ${{ github.event.inputs.use_git_ref || github.event.pull_request.head.sha || github.sha }}
+          submodules: recursive
+
+      - name: Start clean OS container
+        shell: bash
+        env:
+          CI_DOCKERFILE: ${{ matrix.os.dockerfile }}
+          CI_IMAGE: ${{ matrix.os.image }}
+          CI_PLATFORM: ${{ matrix.arch.platform }}
+          CI_ARCH: ${{ matrix.arch.name }}
+          OSNICK: ${{ matrix.os.osnick }}
+          REDIS_PORT: ${{ github.event.inputs.redis_port || '6379' }}
+        run: |
+          set -euo pipefail
+          echo "SKILL_CONTAINER=redis-skill-${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}" >> "$GITHUB_ENV"
+          docker run -d \
+            --name "redis-skill-${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}" \
+            --platform "${CI_PLATFORM}" \
+            -v "$GITHUB_WORKSPACE:/workspace" \
+            -w /workspace \
+            -e CI_DOCKERFILE \
+            -e CI_IMAGE \
+            -e CI_PLATFORM \
+            -e CI_ARCH \
+            -e OSNICK \
+            -e REDIS_PORT \
+            "${CI_IMAGE}" \
+            sh -c 'while :; do sleep 3600; done'
+
+      - name: Install base prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker exec "$SKILL_CONTAINER" sh -lc '
+            set -eu
+            if command -v apt-get >/dev/null 2>&1; then
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -qq
+              apt-get install -yqq --no-install-recommends ca-certificates git make sudo
+            elif command -v dnf >/dev/null 2>&1; then
+              dnf -y install --allowerasing --skip-broken ca-certificates git make sudo
+            elif command -v yum >/dev/null 2>&1; then
+              yum -y install ca-certificates git make sudo
+            elif command -v tdnf >/dev/null 2>&1; then
+              tdnf -y install ca-certificates || true
+              tdnf -y install gawk || true
+              tdnf -y install git || true
+              tdnf -y install make || true
+              tdnf -y install sudo || true
+            elif command -v apk >/dev/null 2>&1; then
+              apk add --no-cache ca-certificates git make sudo
+            else
+              echo "Unsupported package manager" >&2
+              exit 1
+            fi
+          '
+
+      - name: make modules-update all
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker exec "$SKILL_CONTAINER" sh -lc '
+            git config --global --add safe.directory /workspace || true
+            sh scripts/ci-test-redis-build-skill.sh modules-update
+          '
+
+      - name: make bootstrap all
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker exec "$SKILL_CONTAINER" sh -lc 'sh scripts/ci-test-redis-build-skill.sh bootstrap'
+
+      - name: make build all -j8 LTO=0
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker exec "$SKILL_CONTAINER" sh -lc 'sh scripts/ci-test-redis-build-skill.sh build'
+
+      - name: Smoke test source tree after LTO=0
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker exec "$SKILL_CONTAINER" sh -lc 'sh scripts/ci-test-redis-build-skill.sh source-smoke'
+
+      - name: make clean && make build all -j8 LTO=1 (non-gating)
+        if: ${{ !contains(fromJSON('["alma8","rocky8"]'), matrix.os.osnick) }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker exec "$SKILL_CONTAINER" sh -lc 'sh scripts/ci-test-redis-build-skill.sh lto-build'
+
+      - name: Smoke test source tree after LTO=1
+        if: ${{ !contains(fromJSON('["alma8","rocky8"]'), matrix.os.osnick) }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker exec "$SKILL_CONTAINER" sh -lc 'sh scripts/ci-test-redis-build-skill.sh lto-source-smoke'
+
+      - name: Tarball, deploy, and smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker exec "$SKILL_CONTAINER" sh -lc 'sh scripts/ci-test-redis-build-skill.sh package-deploy-smoke'
+
+      - name: Stop container
+        if: always()
+        shell: bash
+        run: |
+          docker rm -f "$SKILL_CONTAINER" >/dev/null 2>&1 || true
+
+  macos:
+    name: macOS
+    runs-on: macos-latest
+    timeout-minutes: 360
+    env:
+      CI_DOCKERFILE: macos
+      CI_IMAGE: macos-latest
+      OSNICK: macos
+      REDIS_PORT: ${{ github.event.inputs.redis_port || '6379' }}
+      DEPLOY_PREFIX: /tmp/redis-deploy
+      TARBALL_CHECK: /tmp/redis-tarball-check
+      TAR: gtar
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          repository: ${{ github.event.inputs.use_repo || github.repository }}
+          ref: ${{ github.event.inputs.use_git_ref || github.event.pull_request.head.sha || github.sha }}
+          submodules: recursive
+
+      - name: Install macOS base prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install gnu-tar
+
+      - name: make modules-update all
+        shell: bash
+        run: |
+          set -euo pipefail
+          sh scripts/ci-test-redis-build-skill.sh modules-update
+
+      - name: make bootstrap all
+        shell: bash
+        run: |
+          set -euo pipefail
+          sh scripts/ci-test-redis-build-skill.sh bootstrap
+
+      - name: make build all -j8 LTO=0
+        shell: bash
+        run: |
+          set -euo pipefail
+          sh scripts/ci-test-redis-build-skill.sh build
+
+      - name: Smoke test source tree after LTO=0
+        shell: bash
+        run: |
+          set -euo pipefail
+          sh scripts/ci-test-redis-build-skill.sh source-smoke
+
+      - name: Tarball, deploy, and smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          sh scripts/ci-test-redis-build-skill.sh package-deploy-smoke
