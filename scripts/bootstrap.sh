@@ -19,21 +19,21 @@ cd "$REPO_ROOT"
 
 MAKE_BIN="${MAKE:-make}"
 
-# check-deps: report which prerequisites are already installed vs missing,
-# WITHOUT installing anything. Strip the flag out of the positional args
-# (so it isn't mistaken for a module name) and pass it to each module's
-# bootstrap via the CHECK_DEPS env var.
+# list: report which prerequisites are installed vs missing, WITHOUT
+# installing. We detect the `list` arg only to drive the skip-guard + unified
+# report below — CHECK_DEPS stays INTERNAL to this script and is NOT exported.
+# The `list` goal itself is forwarded verbatim to each module's sub-make; each
+# module's own Makefile decides what `make bootstrap list` does.
 CHECK_DEPS=0
 _args=""
 for _a in "$@"; do
   case "$_a" in
-    check-deps|--check-deps|--deps-check) CHECK_DEPS=1 ;;
+    list|--list) CHECK_DEPS=1 ;;
     *) _args="$_args $_a" ;;
   esac
 done
 # shellcheck disable=SC2086
 set -- $_args
-export CHECK_DEPS
 
 # Ensure sudo + python3 exist when running as root inside a slim container,
 # matching the legacy Makefile recipe behaviour.
@@ -65,7 +65,7 @@ else
 fi
 export PIP_BREAK_SYSTEM_PACKAGES=1
 
-# check-deps: modules append "ok|missing <pkg>" records here instead of each
+# list: modules append "ok|missing <pkg>" records here instead of each
 # printing its own list; we print one deduped union across all modules below.
 if [ "$CHECK_DEPS" = 1 ]; then
   DEPS_REPORT_FILE="$(mktemp)"
@@ -84,12 +84,12 @@ for name in $selected; do
     failed="$failed $name"
     continue
   fi
-  # In check-deps mode, never invoke a module whose bootstrap can't honor it —
+  # In list mode, never invoke a module whose bootstrap can't honor it —
   # it would install for real. Support is advertised by referencing the shared
   # contract (DEPS_REPORT_FILE) anywhere under .install/ — the name-based
   # modules and redisearch's verify_build_deps.sh all write to it.
   if [ "$CHECK_DEPS" = 1 ] && ! grep -rq DEPS_REPORT_FILE "modules/$name/src/.install" 2>/dev/null; then
-    echo "    !! SKIP: $name does not support check-deps (would install for real)"
+    echo "    !! SKIP: $name does not support list (would install for real)"
     continue
   fi
   # Per-module convention: the inner target is still called `bootstrap` —
@@ -104,7 +104,10 @@ for name in $selected; do
     failed="$failed $name"
     continue
   fi
-  if ! "$MAKE_BIN" -C "modules/$name/src" bootstrap; then
+  # Forward the `list` goal verbatim; the module's Makefile interprets it.
+  if [ "$CHECK_DEPS" = 1 ]; then _goal="bootstrap list"; else _goal="bootstrap"; fi
+  # shellcheck disable=SC2086
+  if ! "$MAKE_BIN" -C "modules/$name/src" $_goal; then
     failed="$failed $name"
   fi
 done
@@ -126,7 +129,7 @@ if [ "$CHECK_DEPS" = 1 ]; then
   # One deduped union across every checked module. A package's installed state
   # is host-global, so dedup by name is safe (no per-module conflicts).
   if [ ! -s "$DEPS_REPORT_FILE" ]; then
-    echo "==> Deps check: no modules reported (none support check-deps)"
+    echo "==> Deps check: no modules reported (none support list)"
     exit 0
   fi
   # Missing records are "pkg" or "pkg:minversion" (a present-but-too-old dep).
