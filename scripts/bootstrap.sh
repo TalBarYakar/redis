@@ -25,15 +25,20 @@ MAKE_BIN="${MAKE:-make}"
 # The `list` goal itself is forwarded verbatim to each module's sub-make; each
 # module's own Makefile decides what `make bootstrap list` does.
 CHECK_DEPS=0
+DRY=0
 _args=""
 for _a in "$@"; do
   case "$_a" in
     list|--list) CHECK_DEPS=1 ;;
+    dry-run)     DRY=1 ;;
     *) _args="$_args $_a" ;;
   esac
 done
 # shellcheck disable=SC2086
 set -- $_args
+
+# dry-run status lines are printed blue (plain when piped, e.g. CI logs).
+if [ "$DRY" = 1 ] && [ -t 1 ]; then _DB="$(printf '\033[1;34m')"; _DR="$(printf '\033[0m')"; else _DB=""; _DR=""; fi
 
 # Ensure sudo + python3 exist when running as root inside a slim container,
 # matching the legacy Makefile recipe behaviour.
@@ -60,6 +65,8 @@ fi
 
 if [ "$CHECK_DEPS" = 1 ]; then
   echo "==> Checking deps for: $selected (no installation)"
+elif [ "$DRY" = 1 ]; then
+  echo "${_DB}==> Dry-run for: $selected (printing install commands for missing deps, no installation)${_DR}"
 else
   echo "==> Installing deps for: $selected"
 fi
@@ -92,6 +99,12 @@ for name in $selected; do
     echo "    !! SKIP: $name does not support list (would install for real)"
     continue
   fi
+  # Same guard for dry-run: skip a module that can't honor `dry-run` (it would
+  # install for real). Support is advertised by referencing DRY_RUN in .install/.
+  if [ "$DRY" = 1 ] && ! grep -rq DRY_RUN "modules/$name/src/.install" 2>/dev/null; then
+    echo "    !! SKIP: $name does not support dry-run (would install for real)"
+    continue
+  fi
   # Per-module convention: the inner target is still called `bootstrap` —
   # that's defined by each module's own Makefile, not by us.
   if ! grep -qE '^bootstrap[[:space:]]*:' "$src_mk"; then
@@ -104,8 +117,10 @@ for name in $selected; do
     failed="$failed $name"
     continue
   fi
-  # Forward the `list` goal verbatim; the module's Makefile interprets it.
-  if [ "$CHECK_DEPS" = 1 ]; then _goal="bootstrap list"; else _goal="bootstrap"; fi
+  # Forward the goal verbatim; the module's Makefile interprets it.
+  if [ "$CHECK_DEPS" = 1 ]; then _goal="bootstrap list"
+  elif [ "$DRY" = 1 ]; then _goal="bootstrap dry-run"
+  else _goal="bootstrap"; fi
   # shellcheck disable=SC2086
   if ! "$MAKE_BIN" -C "modules/$name/src" $_goal; then
     failed="$failed $name"
@@ -172,6 +187,8 @@ if [ "$CHECK_DEPS" = 1 ]; then
   fi
   echo "    Run 'make bootstrap' to install anything not installed."
   [ "$n_missing" -eq 0 ] || exit 1
+elif [ "$DRY" = 1 ]; then
+  echo "${_DB}==> Dry-run complete for: $selected (commands above are what bootstrap would run; nothing installed)${_DR}"
 else
   echo "==> Deps install complete for: $selected"
   echo "    Next: 'make build [<name>]' then 'make test [<name>]' or 'make run'."
