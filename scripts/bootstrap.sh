@@ -37,8 +37,9 @@ done
 # shellcheck disable=SC2086
 set -- $_args
 
-# dry-run status lines are printed blue (plain when piped, e.g. CI logs).
-if [ "$DRY" = 1 ] && [ -t 1 ]; then _DB="$(printf '\033[1;34m')"; _DR="$(printf '\033[0m')"; else _DB=""; _DR=""; fi
+# dry-run headline lines are cyan — distinct from the blue command lines the
+# modules print (plain when piped, e.g. CI logs).
+if [ "$DRY" = 1 ] && [ -t 1 ]; then _DB="$(printf '\033[1;36m')"; _DR="$(printf '\033[0m')"; else _DB=""; _DR=""; fi
 
 # Ensure sudo + python3 exist when running as root inside a slim container,
 # matching the legacy Makefile recipe behaviour.
