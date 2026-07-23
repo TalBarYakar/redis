@@ -283,6 +283,8 @@ Pick whichever option fits your environment:
 
 > **Manual, per-OS install** (no Docker, and you'd rather not let `make bootstrap` touch your host): follow the per-OS dependency instructions in the 8.8 README, which still lists them explicitly — <https://github.com/redis/redis/tree/8.8#readme>.
 
+> **Manual, per-OS install** (no Docker, and you'd rather not let `make bootstrap` touch your host): follow the per-OS dependency instructions in the 8.8 README, which still lists them explicitly — <https://github.com/redis/redis/tree/8.8#readme>.
+
 #### 3. Build and run
 
 ```sh
