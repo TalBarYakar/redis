@@ -24,6 +24,7 @@
 #include <string.h>
 #include <locale.h>
 #include <ctype.h>
+#include <arpa/inet.h>
 
 /*-----------------------------------------------------------------------------
  * Config file name-value maps.
@@ -787,6 +788,16 @@ static int configNeedsApply(standardConfig *config) {
            config->interface.apply;
 }
 
+static const char *configGetPrimaryName(standardConfig *config) {
+    return (config->flags & ALIAS_CONFIG) ? config->alias : config->name;
+}
+
+static int configIsSameConfig(standardConfig *a, standardConfig *b) {
+    if (a == b) return 1;
+    if (!((a->flags | b->flags) & ALIAS_CONFIG)) return 0; /* No alias, so not the same config. */
+    return !strcasecmp(configGetPrimaryName(a), configGetPrimaryName(b));
+}
+
 static void restoreBackupConfig(standardConfig **set_configs, sds *old_values, int count) {
     int i;
     const char *errstr = "unknown error";
@@ -882,7 +893,7 @@ void configSetCommand(client *c) {
 
         /* If this config appears twice then fail */
         for (j = 0; j < i; j++) {
-            if (set_configs[j] == config) {
+            if (configIsSameConfig(set_configs[j], config)) {
                 /* Note: we don't abort the loop since we still want to handle redacting sensitive configs (above) */
                 errstr = "duplicate parameter";
                 err_arg_name = c->argv[2+i*2]->ptr;
@@ -1793,7 +1804,7 @@ int rewriteConfig(char *path, int force_write) {
     /* Step 4: generate a new configuration file from the modified state
      * and write it into the original file. */
     newcontent = rewriteConfigGetContentFromState(state);
-    retval = rewriteConfigOverwriteFile(server.configfile,newcontent);
+    retval = rewriteConfigOverwriteFile(path, newcontent);
 
     sdsfree(newcontent);
     rewriteConfigReleaseState(state);
@@ -2388,6 +2399,22 @@ static int isValidAOFfilename(char *val, const char **err) {
     return 1;
 }
 
+static int isValidPreloadFile(char *val, const char **err) {
+    if (val && strncmp(val, "aof:/", 5) && strncmp(val, "rdb:/", 5)) {
+        *err = "argument must be in the format '[aof|rdb]:[filename]'";
+        return 0;
+    }
+
+    if (val) {
+        char *ext = getFileExtension(val);
+        if (!ext) {
+            *err = "preload-file must end with an extension";
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static int isValidAOFdirname(char *val, const char **err) {
     if (!strcmp(val, "")) {
         *err = "appenddirname can't be empty";
@@ -2395,6 +2422,18 @@ static int isValidAOFdirname(char *val, const char **err) {
     }
     if (!pathIsBaseName(val)) {
         *err = "appenddirname can't be a path, just a dirname";
+        return 0;
+    }
+    return 1;
+}
+
+static int isValidBackupdirname(char *val, const char **err) {
+    if (!strcmp(val, "")) {
+        *err = "backupdirname can't be empty";
+        return 0;
+    }
+    if (!pathIsBaseName(val)) {
+        *err = "backupdirname can't be a path, just a dirname";
         return 0;
     }
     return 1;
@@ -2411,7 +2450,7 @@ static int isValidShutdownOnSigFlags(int val, const char **err) {
 }
 
 static int updateMemoryTrackingEnabled(const char **err) {
-    int memory_tracking_enabled = server.key_memory_histograms || clusterSlotStatsEnabled(CLUSTER_SLOT_STATS_MEM);
+    int memory_tracking_enabled = server.key_memory_histograms || (server.cluster_slot_stats_enabled & CLUSTER_SLOT_STATS_MEM);
     if (!server.memory_tracking_enabled && memory_tracking_enabled) {
         *err = "memory tracking cannot be enabled at runtime";
         return 0;
@@ -2428,13 +2467,7 @@ static int isValidAnnouncedNodename(char *val,const char **err) {
     return 1;
 }
 
-static int isValidAnnouncedHostname(char *val, const char **err) {
-    if (strlen(val) >= NET_HOST_STR_LEN) {
-        *err = "Hostnames must be less than "
-            STRINGIFY(NET_HOST_STR_LEN) " characters";
-        return 0;
-    }
-
+static int isValidHostnameChars(char *val, const char **err) {
     int i = 0;
     char c;
     while ((c = val[i])) {
@@ -2452,10 +2485,70 @@ static int isValidAnnouncedHostname(char *val, const char **err) {
     return 1;
 }
 
+static int isValidAnnouncedHostname(char *val, const char **err) {
+    if (strlen(val) >= NET_HOST_STR_LEN) {
+        *err = "Hostnames must be less than "
+            STRINGIFY(NET_HOST_STR_LEN) " characters";
+        return 0;
+    }
+    return isValidHostnameChars(val, err);
+}
+
+/* Validation function for cluster-announce-ip.
+ * Ensures the IP address is valid and rejects control characters. */
+static int isValidClusterAnnounceIp(char *val, const char **err) {
+    unsigned char buf[sizeof(struct in6_addr)];
+    /* Empty string is allowed - it will be converted to NULL by EMPTY_STRING_IS_NULL flag */
+    if (val[0] == '\0') {
+        return 1;
+    }
+
+    /* Accept valid IPv4 or IPv6 */
+    if (inet_pton(AF_INET, val, buf) == 1 || inet_pton(AF_INET6, val, buf) == 1) {
+        return 1;
+    }
+    /* Also accept valid hostnames, but limited to NET_IP_STR_LEN since
+     * cluster_announce_ip is stored in a NET_IP_STR_LEN buffer */
+    if (strlen(val) >= NET_IP_STR_LEN) {
+        *err = "Hostnames for cluster-announce-ip must be less than "
+               STRINGIFY(NET_IP_STR_LEN) " characters";
+        return 0;
+    }
+    /* Also accept valid hostnames */
+    return isValidHostnameChars(val, err);
+}
+
 /* Validate specified string is a valid proc-title-template */
 static int isValidProcTitleTemplate(char *val, const char **err) {
     if (!validateProcTitleTemplate(val)) {
         *err = "template format is invalid or contains unknown variables";
+        return 0;
+    }
+    return 1;
+}
+
+/* Validate that array-slice-size is a power of two */
+static int isValidArraySliceSize(long long val, const char **err) {
+    if (val <= 0 || (val & (val - 1)) != 0) {
+        *err = "array-slice-size must be a power of two";
+        return 0;
+    }
+    return 1;
+}
+
+/* Validate array-sparse-kmax: if non-zero, must be > kmin */
+static int isValidArraySparseKmax(long long val, const char **err) {
+    if (val > 0 && (unsigned int)val <= server.array_sparse_kmin) {
+        *err = "array-sparse-kmax must be greater than array-sparse-kmin when non-zero";
+        return 0;
+    }
+    return 1;
+}
+
+/* Validate array-sparse-kmin: must be < kmax when kmax is non-zero */
+static int isValidArraySparseKmin(long long val, const char **err) {
+    if (server.array_sparse_kmax > 0 && (unsigned int)val >= server.array_sparse_kmax) {
+        *err = "array-sparse-kmin must be less than array-sparse-kmax";
         return 0;
     }
     return 1;
@@ -2699,20 +2792,32 @@ int updateClusterHumanNodename(const char **err) {
 }
 
 static int applyTlsCfg(const char **err) {
-    UNUSED(err);
-
     /* If TLS is enabled, try to configure OpenSSL. */
-    if ((server.tls_port || server.tls_replication || server.tls_cluster)
-         && connTypeConfigure(connectionTypeTls(), &server.tls_ctx_config, 1) == C_ERR) {
-        *err = "Unable to update TLS configuration. Check server logs.";
-        return 0;
+    if (server.tls_port || server.tls_replication || server.tls_cluster) {
+        ConnectionType *ct_tls = connectionTypeTls();
+        /* Refuse if no TLS support compiled in */
+        if (!ct_tls) {
+            *err = "TLS support is not compiled in, cannot enable TLS options.";
+            return 0;
+        }
+        if (connTypeConfigure(ct_tls, &server.tls_ctx_config, 1) == C_ERR) {
+            *err = "Unable to update TLS configuration. Check server logs.";
+            return 0;
+        }
     }
     return 1;
 }
 
 static int applyTLSPort(const char **err) {
+    ConnectionType *ct_tls = connectionTypeTls();
+    /* Refuse if no TLS support compiled in */
+    if (!ct_tls) {
+        *err = "TLS support is not compiled in, cannot set a TLS port.";
+        return 0;
+    }
+
     /* Configure TLS in case it wasn't enabled */
-    if (connTypeConfigure(connectionTypeTls(), &server.tls_ctx_config, 0) == C_ERR) {
+    if (connTypeConfigure(ct_tls, &server.tls_ctx_config, 0) == C_ERR) {
         *err = "Unable to update TLS configuration. Check server logs.";
         return 0;
     }
@@ -2917,7 +3022,11 @@ static int setConfigNotifyKeyspaceEventsOption(standardConfig *config, sds *argv
     }
     int flags = keyspaceEventsStringToFlags(argv[0]);
     if (flags == -1) {
-        *err = "Invalid event class character. Use 'Ag$lshzxeKEtmdn'.";
+#ifdef ENABLE_GCRA
+        *err = "Invalid event class character. Use 'Ag$lshzxeKEtmdnocraSTIV'.";
+#else
+        *err = "Invalid event class character. Use 'Ag$lshzxeKEtmdnocaSTIV'.";
+#endif
         return 0;
     }
     server.notify_keyspace_events = flags;
@@ -3159,7 +3268,7 @@ standardConfig static_configs[] = {
     createStringConfig("pidfile", NULL, IMMUTABLE_CONFIG, EMPTY_STRING_IS_NULL, server.pidfile, NULL, NULL, NULL),
     createStringConfig("replica-announce-ip", "slave-announce-ip", MODIFIABLE_CONFIG, EMPTY_STRING_IS_NULL, server.slave_announce_ip, NULL, NULL, NULL),
     createStringConfig("masteruser", NULL, MODIFIABLE_CONFIG | SENSITIVE_CONFIG, EMPTY_STRING_IS_NULL, server.masteruser, NULL, NULL, NULL),
-    createStringConfig("cluster-announce-ip", NULL, MODIFIABLE_CONFIG, EMPTY_STRING_IS_NULL, server.cluster_announce_ip, NULL, NULL, updateClusterIp),
+    createStringConfig("cluster-announce-ip", NULL, MODIFIABLE_CONFIG, EMPTY_STRING_IS_NULL, server.cluster_announce_ip, NULL, isValidClusterAnnounceIp, updateClusterIp),
     createStringConfig("cluster-config-file", NULL, IMMUTABLE_CONFIG, ALLOW_EMPTY_STRING, server.cluster_configfile, "nodes.conf", NULL, NULL),
     createStringConfig("cluster-announce-hostname", NULL, MODIFIABLE_CONFIG, EMPTY_STRING_IS_NULL, server.cluster_announce_hostname, NULL, isValidAnnouncedHostname, updateClusterHostname),
     createStringConfig("cluster-announce-human-nodename", NULL, MODIFIABLE_CONFIG, EMPTY_STRING_IS_NULL, server.cluster_announce_human_nodename, NULL, isValidAnnouncedNodename, updateClusterHumanNodename),
@@ -3167,6 +3276,8 @@ standardConfig static_configs[] = {
     createStringConfig("dbfilename", NULL, MODIFIABLE_CONFIG | PROTECTED_CONFIG, ALLOW_EMPTY_STRING, server.rdb_filename, "dump.rdb", isValidDBfilename, NULL),
     createStringConfig("appendfilename", NULL, IMMUTABLE_CONFIG, ALLOW_EMPTY_STRING, server.aof_filename, "appendonly.aof", isValidAOFfilename, NULL),
     createStringConfig("appenddirname", NULL, IMMUTABLE_CONFIG, ALLOW_EMPTY_STRING, server.aof_dirname, "appendonlydir", isValidAOFdirname, NULL),
+    createStringConfig("backupdirname", NULL, IMMUTABLE_CONFIG, EMPTY_STRING_IS_NULL, server.backup_dirname, "backupdir", isValidBackupdirname, NULL),
+    createStringConfig("preload-file", NULL, IMMUTABLE_CONFIG, EMPTY_STRING_IS_NULL, server.preload_file, NULL, isValidPreloadFile, NULL),
     createStringConfig("server-cpulist", "server_cpulist", IMMUTABLE_CONFIG, EMPTY_STRING_IS_NULL, server.server_cpulist, NULL, NULL, NULL),
     createStringConfig("bio-cpulist", "bio_cpulist", IMMUTABLE_CONFIG, EMPTY_STRING_IS_NULL, server.bio_cpulist, NULL, NULL, NULL),
     createStringConfig("aof-rewrite-cpulist", "aof_rewrite_cpulist", IMMUTABLE_CONFIG, EMPTY_STRING_IS_NULL, server.aof_rewrite_cpulist, NULL, NULL, NULL),
@@ -3244,6 +3355,11 @@ standardConfig static_configs[] = {
     createIntConfig("cluster-compatibility-sample-ratio", NULL, MODIFIABLE_CONFIG, 0, 100, server.cluster_compatibility_sample_ratio, 0, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("cluster-slot-migration-max-archived-tasks", NULL, MODIFIABLE_CONFIG | HIDDEN_CONFIG, 1, INT_MAX, server.asm_max_archived_tasks, 32, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("lookahead", NULL, MODIFIABLE_CONFIG, 1, INT_MAX, server.lookahead, REDIS_DEFAULT_LOOKAHEAD, INTEGER_CONFIG, NULL, NULL),
+    createIntConfig("slowlog-entry-max-argc", NULL, MODIFIABLE_CONFIG, 2, INT_MAX, server.slowlog_max_argc, 32, INTEGER_CONFIG, NULL, NULL),
+#ifdef USE_COMPRESSION
+    createIntConfig("repl-compression", NULL, IMMUTABLE_CONFIG, 0, 22, server.repl_compression, 0, INTEGER_CONFIG, NULL, NULL),
+    createIntConfig("repl-compression-max-latency", NULL, MODIFIABLE_CONFIG, 0, INT_MAX, server.compression_max_latency, 100, INTEGER_CONFIG, NULL, NULL), /* 100ms */
+#endif
 
     /* Unsigned int configs */
     createUIntConfig("maxclients", NULL, MODIFIABLE_CONFIG, 1, UINT_MAX, server.maxclients, 10000, INTEGER_CONFIG, NULL, updateMaxclients),
@@ -3251,6 +3367,10 @@ standardConfig static_configs[] = {
     createUIntConfig("socket-mark-id", NULL, IMMUTABLE_CONFIG, 0, UINT_MAX, server.socket_mark_id, 0, INTEGER_CONFIG, NULL, NULL),
     createUIntConfig("max-new-connections-per-cycle", NULL, MODIFIABLE_CONFIG, 1, 1000, server.max_new_conns_per_cycle, 10, INTEGER_CONFIG, NULL, NULL),
     createUIntConfig("max-new-tls-connections-per-cycle", NULL, MODIFIABLE_CONFIG, 1, 1000, server.max_new_tls_conns_per_cycle, 1, INTEGER_CONFIG, NULL, NULL),
+    /* Array type configuration */
+    createUIntConfig("array-slice-size", NULL, MODIFIABLE_CONFIG, AR_SLICE_SIZE_MIN, AR_SLICE_SIZE_MAX, server.array_slice_size, AR_SLICE_SIZE_DEFAULT, INTEGER_CONFIG, isValidArraySliceSize, NULL),
+    createUIntConfig("array-sparse-kmax", NULL, MODIFIABLE_CONFIG, 0, 256, server.array_sparse_kmax, AR_SPARSE_KMAX_DEFAULT, INTEGER_CONFIG, isValidArraySparseKmax, NULL),
+    createUIntConfig("array-sparse-kmin", NULL, MODIFIABLE_CONFIG, 0, 256, server.array_sparse_kmin, AR_SPARSE_KMIN_DEFAULT, INTEGER_CONFIG, isValidArraySparseKmin, NULL),
 #ifdef LOG_REQ_RES
     createUIntConfig("client-default-resp", NULL, IMMUTABLE_CONFIG | HIDDEN_CONFIG, 2, 3, server.client_default_resp, 2, INTEGER_CONFIG, NULL, NULL),
 #endif
@@ -3258,6 +3378,7 @@ standardConfig static_configs[] = {
     /* Unsigned Long configs */
     createULongConfig("active-defrag-max-scan-fields", NULL, MODIFIABLE_CONFIG, 1, LONG_MAX, server.active_defrag_max_scan_fields, 1000, INTEGER_CONFIG, NULL, NULL), /* Default: keys with more than 1000 fields will be processed separately */
     createULongConfig("slowlog-max-len", NULL, MODIFIABLE_CONFIG, 0, LONG_MAX, server.slowlog_max_len, 128, INTEGER_CONFIG, NULL, NULL),
+    createULongConfig("slowlog-entry-max-string-len", NULL, MODIFIABLE_CONFIG, 1, LONG_MAX, server.slowlog_max_string_len, 128, INTEGER_CONFIG, NULL, NULL),
     createULongConfig("acllog-max-len", NULL, MODIFIABLE_CONFIG, 0, LONG_MAX, server.acllog_max_len, 128, INTEGER_CONFIG, NULL, NULL),
 
     /* Long Long configs */
@@ -3282,6 +3403,12 @@ standardConfig static_configs[] = {
 
     /* Size_t configs */
     createSizeTConfig("hash-max-listpack-entries", "hash-max-ziplist-entries", MODIFIABLE_CONFIG, 0, LONG_MAX, server.hash_max_listpack_entries, 512, INTEGER_CONFIG, NULL, NULL),
+    createSizeTConfig("hash-min-template-entries", NULL, MODIFIABLE_CONFIG, 0, LONG_MAX, server.hash_min_template_entries, 0, INTEGER_CONFIG, NULL, NULL),
+    createSizeTConfig("hash-max-template-entries", NULL, MODIFIABLE_CONFIG, 0, LONG_MAX, server.hash_max_template_entries, 0, INTEGER_CONFIG, NULL, NULL),
+    createSizeTConfig("hash-rdb-load-min-template-entries", NULL, MODIFIABLE_CONFIG, 0, LONG_MAX, server.hash_rdb_load_min_template_entries, 0, INTEGER_CONFIG, NULL, NULL),
+    createSizeTConfig("hash-rdb-load-max-template-entries", NULL, MODIFIABLE_CONFIG, 0, LONG_MAX, server.hash_rdb_load_max_template_entries, 0, INTEGER_CONFIG, NULL, NULL),
+    createSizeTConfig("hash-rdb-load-template-disassembly-threshold", NULL, MODIFIABLE_CONFIG, 0, LONG_MAX, server.hash_rdb_load_template_disassembly_threshold, 0, INTEGER_CONFIG, NULL, NULL),
+
     createSizeTConfig("set-max-intset-entries", NULL, MODIFIABLE_CONFIG, 0, LONG_MAX, server.set_max_intset_entries, 512, INTEGER_CONFIG, NULL, NULL),
     createSizeTConfig("set-max-listpack-entries", NULL, MODIFIABLE_CONFIG, 0, LONG_MAX, server.set_max_listpack_entries, 128, INTEGER_CONFIG, NULL, NULL),
     createSizeTConfig("set-max-listpack-value", NULL, MODIFIABLE_CONFIG, 0, LONG_MAX, server.set_max_listpack_value, 64, INTEGER_CONFIG, NULL, NULL),
@@ -3297,6 +3424,7 @@ standardConfig static_configs[] = {
 
     /* Other configs */
     createTimeTConfig("repl-backlog-ttl", NULL, MODIFIABLE_CONFIG, 0, LONG_MAX, server.repl_backlog_time_limit, 60*60, INTEGER_CONFIG, NULL, NULL), /* Default: 1 hour */
+    createTimeTConfig("backup-sealed-ttl", NULL, MODIFIABLE_CONFIG, 0, LONG_MAX, server.backup_sealed_ttl, 0, INTEGER_CONFIG, NULL, NULL), /* Default: disabled */
     createOffTConfig("auto-aof-rewrite-min-size", NULL, MODIFIABLE_CONFIG, 0, LLONG_MAX, server.aof_rewrite_min_size, 64*1024*1024, MEMORY_CONFIG, NULL, NULL),
     createOffTConfig("loading-process-events-interval-bytes", NULL, MODIFIABLE_CONFIG | HIDDEN_CONFIG, 1024, INT_MAX, server.loading_process_events_interval_bytes, 1024*512, INTEGER_CONFIG, NULL, NULL),
     createOffTConfig("aof-load-corrupt-tail-max-size", NULL, MODIFIABLE_CONFIG, 0, LONG_MAX, server.aof_load_corrupt_tail_max_size, 0, INTEGER_CONFIG, NULL, NULL),
@@ -3702,6 +3830,7 @@ int moduleSetEnumConfig(client *c, sds name, sds *vals, int vals_cnt, const char
 
 int moduleSetNumericConfig(client *c, sds name, long long val, const char **err) {
     standardConfig *config = getMutableConfig(c, name, err);
+    if (!config) return 0;
     if (config->type != NUMERIC_CONFIG) return 0;
 
     sds old_value = config->interface.get(config);

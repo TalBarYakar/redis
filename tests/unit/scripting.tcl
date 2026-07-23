@@ -2606,6 +2606,14 @@ start_server {tags {"scripting"}} {
         assert_equal [errorrstat ERR r] {count=1}
     }
 
+    test "LUA redis.error_reply API with CRLF injection attempt" {
+        catch {
+            r eval {error(redis.error_reply("X\r\n+INJECTED"))} 0
+        } err
+        # The error message should have CRLF replaced with spaces
+        assert_match {ERR X  +INJECTED*} $err
+    }
+
     test "LUA redis.status_reply API" {
         r config resetstat
         r readraw 1
@@ -2684,5 +2692,17 @@ start_server {tags {"scripting"}} {
         assert_error {ERR unknown error script: *} {
             r eval "error({})" 0
         }
+    }
+}
+
+start_server {tags {"scripting"}} {
+    test "Wrong arity EVAL in acl_check_cmd returns error not crash" {
+        r acl setuser bob on {>123} {+@scripting} {+set} {~x*}
+        assert_equal [r auth bob 123] {OK}
+        # Must be the first Lua call in this server instance
+        catch {run_script {
+            return redis.acl_check_cmd('eval','script')
+        } 0} e
+        assert_match {*Wrong number of args*} $e
     }
 }
