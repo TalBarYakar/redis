@@ -29,7 +29,8 @@ source under `modules/<name>/src/`, so **do not** run `make modules-update`
 there — the sources are present and pinned.
 
 These instructions apply to Redis 8.10 and above; the tarball ships the
-built modules, so just build Redis. For the full per-OS prerequisites and
+module sources, so just build Redis — the build generates `redis-full.conf`
+for you. For the full per-OS prerequisites and
 build steps, see [Build Redis from source](../README.md#build-redis-from-source).
 For versions lower than 8.10, see the
 [8.8 build instructions](https://github.com/redis/redis/tree/8.8#build-redis-from-source).
@@ -147,7 +148,7 @@ make test redistimeseries             # exercise the module
 
 - `redis.conf` — tracked, hand-edited Redis-core config. **Do not** add
   module load lines here.
-- `redis-full.conf` — untracked, regenerated on every `make modules-update`. This is the file that actually loads the
+- `redis-full.conf` — untracked, regenerated on every `make build`. This is the file that actually loads the
   bundled modules. It's `redis.conf` plus a `loadmodule` line and
   inlined `module.conf` for each built module.
 
@@ -158,14 +159,9 @@ config:
 ./src/redis-server redis-full.conf
 ```
 
-Release tarballs (built with `make tarball`) bake the module config straight
-into `redis.conf` during packaging (see
-[MODULES.md §6.1](MODULES.md#61-baking-the-module-config-into-redisconf)), so
-from an extracted tarball you can also run:
-
-```bash
-./src/redis-server redis.conf
-```
+This is the same from an extracted release tarball: the tarball ships
+`redis.conf` verbatim (no module config baked in, no `redis-full.conf`), and the
+`make` you run there generates `redis-full.conf` for the modules that built.
 
 ## IDE setup (VSCode / Cursor)
 

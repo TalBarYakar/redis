@@ -16,7 +16,8 @@
 #                           in modules.yaml; pass an explicit list to restrict)
 #   ASSUME_BUILT            "1" / "true" / "yes" → emit active loadmodule lines
 #                           regardless of whether the .so is present on disk
-#                           (used by `make tarball`)
+#                           (no caller in-tree; for generating a conf by hand
+#                           before the modules are built)
 #   MODULES_MANIFEST_FILE   manifest path             (default: modules/modules.yaml)
 #   PREFIX                  installed modules directory. When set, switches to
 #                           install mode: loadmodule paths are written as

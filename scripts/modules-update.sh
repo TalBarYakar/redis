@@ -5,15 +5,12 @@
 #         (no args = all modules in modules.yaml)
 #
 # Env: MODULES_UPDATE_SHALLOW=1  clone with --depth 1
-#      MAKE                      make binary (defaults to `make`)
 
 set -eu
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)" || exit 1
 . "$SCRIPT_DIR/lib/manifest.sh"
 cd "$REPO_ROOT"
-
-MAKE_BIN="${MAKE:-make}"
 
 available="$(manifest_modules | manifest_join_words)"
 requested="$*"
@@ -25,13 +22,12 @@ for r in $requested; do
   case "$r" in all|.|'*') requested="$available"; break ;; esac
 done
 
-# `none` — clone/refresh nothing; just regenerate redis-full.conf with no
-# modules, reverting the loadmodule lines / emptying the Modules section (same
-# contract as `make sync-redis-conf none`).
+# `none` — clone/refresh nothing. redis-full.conf is not this script's business
+# anymore (scripts/build.sh regenerates it from what actually built), so this
+# is a plain no-op.
 for r in $requested; do
   case "$r" in none)
-    echo "==> 'none' requested — skipping clone; reverting redis-full.conf module section"
-    "$MAKE_BIN" --no-print-directory sync-redis-conf MODULES=none
+    echo "==> 'none' requested — nothing to clone"
     exit 0 ;;
   esac
 done
@@ -153,14 +149,6 @@ echo
 echo "==> Modules updated: $requested"
 echo "    Next: run 'make bootstrap [<name> ...]' to install per-module build/test deps."
 
-echo "==> Refreshing redis-full.conf via sync-redis-conf"
-# Sync exactly the requested modules — a `make modules-update redistimeseries`
-# refreshes that module's loadmodule line/block in redis-full.conf. Each
-# module's active/missing state is independently derived from .so presence on
-# disk unless ASSUME_BUILT is set.
-#
-# ASSUME_BUILT=1: emit an active `loadmodule` line for each requested module
-# even though this script only clones source and never builds — so a
-# `make modules-update redistimeseries` leaves redis-full.conf ready to load
-# the module once it's built, instead of a commented "not built" placeholder.
-"$MAKE_BIN" --no-print-directory sync-redis-conf MODULES="$requested" ASSUME_BUILT=1
+# redis-full.conf is deliberately NOT regenerated here: cloning source says
+# nothing about what can actually be loaded. scripts/build.sh regenerates it
+# from the modules that built successfully and have a .so on disk.

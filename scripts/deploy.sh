@@ -20,6 +20,9 @@
 #   2. After build, copy artifacts into place ourselves (NOT via each
 #      module's `install` target). This keeps the install step a pure copy
 #      and avoids depending on per-module Makefile install recipes.
+#   3. Regenerate redis-full.conf with $PREFIX-ed loadmodule paths and promote
+#      it onto redis.conf (scripts/apply-redis-conf.sh), so the installed
+#      redis-server can be started with the plain `redis.conf`.
 #
 # Failures during build are surfaced from build.sh; failures during copy are
 # collected and reported at the end of this script.
@@ -123,17 +126,21 @@ if [ -n "$modules" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Phase 3: rewrite the loadmodule paths in redis-full.conf and redis.conf
-# in-place. Only the LOADMODULE_BEGIN/END block is replaced — the rest of
-# each file is untouched. Runs even when some modules failed to copy so that
-# the successfully-installed ones get correct absolute paths.
+# Phase 3: regenerate redis-full.conf with installed (PREFIX-ed) loadmodule
+# paths, then promote it onto redis.conf — both done by apply-redis-conf.sh
+# (sync-redis-conf + mv). Runs even when some modules failed to copy, so the
+# successfully-installed ones still get their absolute paths.
+#
+# PREFIX handed to sync is the installed *modules directory*, not the install
+# root: sync writes each loadmodule as $PREFIX/<so basename> and tests
+# existence at exactly that path, so only modules whose .so really landed in
+# phase 2 get an active line. It includes $DESTDIR when set — same as the
+# paths phase 2 wrote to, which is what makes the existence check meaningful.
 # ---------------------------------------------------------------------------
-REDIS_FULL_CONF="${REDIS_GEN_CONF:-redis-full.conf}"
-REDIS_CONF="${REDIS_CONF:-redis.conf}"
-LOADMODULE_BEGIN="# >>> BEGIN: loadmodule paths (replaced by make deploy) <<<"
-LOADMODULE_END="# <<< END: loadmodule paths <<<"
 
 # Build the list of successfully-installed modules (i.e. those NOT in $failed).
+# Empty means "no modules" — spell it `none`, since an empty MODULES reads as
+# "every manifest module" to sync-redis-conf.
 installed_modules=""
 for name in $modules; do
   case " $failed " in *" $name "*) continue ;; esac
@@ -141,47 +148,10 @@ for name in $modules; do
 done
 installed_modules="${installed_modules# }"
 
-if [ -n "$installed_modules" ]; then
-  new_lines=""
-  for name in $installed_modules; do
-    target="$(manifest_field "$name" target_module)"
-    [ -z "$target" ] && continue
-    so_basename="$(basename "$target")"
-    new_lines="${new_lines}loadmodule $INSTALL_MOD_DIR/$so_basename
-"
-  done
-
-  # Write new_lines to a temp file so awk can read it with getline — BSD awk
-  # (macOS /usr/bin/awk) rejects embedded newlines in -v values.
-  new_lines_file="$(mktemp)"
-  printf '%s' "$new_lines" > "$new_lines_file"
-
-  _patch_conf() {
-    local conf="$1"
-    [ -f "$conf" ] || return 0
-    grep -qF "$LOADMODULE_BEGIN" "$conf" 2>/dev/null || return 0
-    local tmp
-    tmp="$(mktemp "${conf}.deploy.XXXXXX")"
-    trap 'rm -f "$tmp" "$new_lines_file"' EXIT
-    awk -v begin="$LOADMODULE_BEGIN" -v end="$LOADMODULE_END" -v newfile="$new_lines_file" '
-      $0 == begin {
-        print
-        while ((getline line < newfile) > 0) print line
-        close(newfile)
-        skip=1; next
-      }
-      $0 == end   { skip=0 }
-      !skip        { print }
-    ' "$conf" > "$tmp"
-    mv "$tmp" "$conf"
-    trap - EXIT
-    echo "==> Updated loadmodule paths in $conf"
-  }
-
-  _patch_conf "$REDIS_FULL_CONF"
-  _patch_conf "$REDIS_CONF"
-  rm -f "$new_lines_file"
-fi
+echo
+echo "==> Generating redis-full.conf (loadmodule → $INSTALL_MOD_DIR) and promoting it to redis.conf"
+MODULES="${installed_modules:-none}" PREFIX="$INSTALL_MOD_DIR" \
+  "$SCRIPT_DIR/apply-redis-conf.sh"
 
 echo
 echo "==> Deploy complete."
@@ -189,6 +159,8 @@ echo "    redis-server: $INSTALL_BIN_DIR/redis-server"
 if [ -n "$modules" ]; then
   echo "    Module .so directory: $INSTALL_MOD_DIR/"
 fi
+echo "    Config: ${REDIS_CONF:-redis.conf} (module config promoted into it;"
+echo "            'git checkout -- ${REDIS_CONF:-redis.conf}' reverts)"
 
 if [ -n "$failed" ]; then
   echo

@@ -10,8 +10,9 @@
 #   TARBALL_SKIP_MODULES_UPDATE=1        skip the pre-step modules-update
 #
 # Produces redis-<tag>/ containing:
-#   - redis core source tree (from `git archive <tag>`)
+#   - redis core source tree (from `git archive <tag>`), redis.conf untouched
 #   - modules/<name>/src/ at the pinned ref from modules.yaml, .git/.github stripped
+# No redis-full.conf is shipped — the consumer's `make build` generates it.
 # Output tar is sorted, with mtimes set to the tag's commit timestamp, owner=0.
 
 set -eu
@@ -172,13 +173,10 @@ cp modules/modules.yaml         "$work/modules/modules.yaml"
 chmod +x "$work/scripts/sync-redis-conf.sh" "$work/scripts/apply-redis-conf.sh" "$work/scripts/deploy.sh"
 rm -f "$work/modules.yaml"
 
-echo
-echo "==> Generating redis-full.conf and applying into redis.conf (ASSUME_BUILT=1)"
-# Run apply-redis-conf inside the staging tree: generates redis-full.conf with
-# relative loadmodule paths, then overwrites redis.conf with the result.
-# ASSUME_BUILT=1 emits active loadmodule lines even though .so files aren't
-# present yet — consumer builds first, then runs redis-server redis.conf.
-( cd "$work" && ASSUME_BUILT=1 bash scripts/apply-redis-conf.sh )
+# No config generation here: redis.conf ships exactly as it is in $TAG, and
+# redis-full.conf is not part of the tarball at all. The consumer's `make build`
+# generates redis-full.conf from the modules that actually built (scripts/
+# build.sh → sync-redis-conf), which is the only place that file comes from.
 
 echo
 echo "==> Producing reproducible tarball at $out"

@@ -26,7 +26,7 @@ Everywhere below, `make` means "GNU make"; substitute `gmake` on macOS.
 | `scripts/build.sh` etc. | One script per top-level target (`build`, `deps`, `run`, `test`, `modules-update`, `modules-shallow`, `sync-redis-conf`, `tarball`). The top-level `Makefile` exposes each as a 1–3-line target that shells out here. |
 | `scripts/sync-redis-conf.sh` | Generates `redis-full.conf` from `redis.conf` + per-module `module.conf` files. See §6. |
 | `redis.conf` | Tracked, hand-edited Redis-core config (stock upstream layout — no markers). `sync-redis-conf` emits it verbatim and appends the Modules section after it; don't hand-add `loadmodule` lines. |
-| `redis-full.conf` | Untracked, regenerated on every `make modules-update`. This is the file you actually load. |
+| `redis-full.conf` | Untracked, regenerated on every `make build`, from the modules that built successfully. This is the file you actually load. |
 | `src/redis-server` | Redis binary — produced by `make`. |
 
 Only modules listed in `modules.yaml` are considered "external" — those
@@ -116,8 +116,9 @@ successful run, `modules/<name>/src/.prepared` is touched so
 `common.mk`'s prepare step is satisfied and won't try to re-clone on
 subsequent builds.
 
-After cloning, `make modules-update` invokes `make sync-redis-conf` to
-regenerate `redis-full.conf` from the updated state (see §6).
+`make modules-update` does not touch `redis-full.conf` — cloning source
+says nothing about what can be loaded. `make build` invokes
+`make sync-redis-conf` for the modules that built successfully (see §6).
 
 ### Shallow clones: `make modules-shallow`
 
@@ -326,29 +327,32 @@ previous `redis-full.conf` intact.
 | Variable | Default | Purpose |
 |---|---|---|
 | `MODULES` | every module in `modules.yaml` | Subset of modules to include. Unrequested modules are omitted entirely (not even commented out). |
-| `ASSUME_BUILT` | unset | When `1` / `true` / `yes`, emit active `loadmodule` lines regardless of whether the `.so` is on disk. Used by `make tarball`. |
-| `PREFIX` | `$PWD` (= repo root) | Install root prepended to every emitted `loadmodule` path. `./modules/foo/foo.so` → `$PREFIX/modules/foo/foo.so`. Pass on the make line: `make PREFIX=/opt/redis-deploy`. |
+| `ASSUME_BUILT` | unset | When `1` / `true` / `yes`, emit active `loadmodule` lines regardless of whether the `.so` is on disk. No `make` target sets it — it's for generating a conf ahead of the build by hand. |
+| `PREFIX` | unset (dev mode) | When set, the **installed modules directory**: every emitted `loadmodule` becomes `$PREFIX/<so basename>` (`./modules/foo/foo.so` → `$PREFIX/foo.so`), and existence is tested there. Set by `make deploy` to `<install prefix>/lib/redis/modules`. Unset = paths kept relative, as in `modules.yaml`. |
 | `REDIS_CONF` | `redis.conf` | Source Redis-core config |
 | `REDIS_GEN_CONF` | `redis-full.conf` | Destination |
 
-`make sync-redis-conf` runs automatically at the end of
-`make modules-update`, so most users never invoke it directly. Run it by hand only if you've edited `modules.yaml` /
-`module.conf` and want an immediate refresh, or if you want to scope
-the file to a specific module subset.
+`make sync-redis-conf` runs automatically at the end of `make build`, scoped to
+the modules that built successfully in that run (`MODULES=<built>`, or
+`MODULES=none` when nothing built) and with no `ASSUME_BUILT` — so a module that
+built but left no `.so` still gets a commented placeholder, never an active
+`loadmodule` line. Because a subset build passes only the modules it built, a
+`make build redisjson` regenerates the file from scratch with just that module's
+block. `make modules-update` does **not** run it. Invoke it by hand if you've
+edited `modules.yaml` / `module.conf` and want a refresh without rebuilding.
 
 ## 6.1 Baking the module config into `redis.conf`
 
-`make tarball` produces a release tarball whose `redis.conf` already contains
-the full module configuration — the Redis-core config with the generated Modules
-block (loadmodule lines + per-module settings) appended after it. So a user who
-extracts the tarball can run `./src/redis-server redis.conf` directly and get the
-bundled modules, without pointing at `redis-full.conf`.
+`scripts/apply-redis-conf.sh` generates `redis-full.conf` and then overwrites
+`redis.conf` with it, so `./src/redis-server redis.conf` loads the modules.
 
-This baking happens **only** during `make tarball` (inside its staging tree).
-There is no `make` target that rewrites your local `redis.conf`, and the
-`redis.conf` tracked in the repo is never modified by the normal flow. For local
-runs, use the auto-generated `redis-full.conf`
-(`./src/redis-server redis-full.conf`).
+`make deploy` / `make install` run it as their last phase, with
+`PREFIX=$PREFIX/lib/redis/modules` — so the installed `redis.conf` points at the
+installed `.so` files. `make build` does **not** (it only writes
+`redis-full.conf`, with relative paths), and `make tarball` does **not** either
+(the packaged `redis.conf` is whatever the tag has, and no `redis-full.conf` is
+shipped). You can also run it by hand. `git checkout -- redis.conf` reverts an
+apply.
 
 It's idempotent: the Modules block is fenced by
 `# >>> BEGIN section: Modules … <<<` / matching `END`, and each regeneration
@@ -501,13 +505,12 @@ make tarball TAG=<tag> \
 4. Strips `.git/`, `.github/`, and `.gitmodules` from cloned modules
    (Redis core's own `.github/` is preserved — it came from `git
    archive` and isn't dev-clone metadata).
-5. Overlays the local `scripts/sync-redis-conf.sh`, `scripts/lib/manifest.sh`,
-   and `modules/modules.yaml` so tarball-time fixes ship without re-tagging
-   Redis core, then **bakes the module config into the packaged `redis.conf`**
-   at staging time — the Modules block is generated and appended (with active
-   `loadmodule` lines even though the `.so`s aren't built yet). So the shipped
-   `redis.conf` loads the bundled modules out of the box; `redis-full.conf` is
-   not packed separately.
+5. Overlays the local `scripts/sync-redis-conf.sh`, `scripts/apply-redis-conf.sh`,
+   `scripts/deploy.sh`, `scripts/lib/manifest.sh`, and `modules/modules.yaml` so
+   tarball-time fixes ship without re-tagging Redis core. **No config is
+   generated at packaging time**: `redis.conf` ships exactly as `git archive
+   <tag>` produced it, and no `redis-full.conf` is packed. The consumer's `make`
+   generates `redis-full.conf` from the modules that actually built (§6).
 6. Produces a deterministic tarball: entries sorted by name, mtimes
    pinned to the tag's commit timestamp, owner/group `0`, gzip with
    `-n` (no embedded mtime). Two runs from the same `TAG` yield
@@ -536,14 +539,14 @@ redis-<tag>/
 tar xzf redis-<tag>.tar.gz
 cd redis-<tag>
 gmake INSTALL_RUST_TOOLCHAIN=yes
-./src/redis-server redis.conf
+./src/redis-server redis-full.conf
 ```
 
-The tarball's `redis.conf` already has the module config baked in (done by
-`make tarball` at packaging time — see §6.1), so it loads the bundled modules
-out of the box; no extra step. If you'd rather keep the module config in a
-separate file, `gmake sync-redis-conf` regenerates `redis-full.conf` and you can
-run `./src/redis-server redis-full.conf` instead.
+The build generates `redis-full.conf` (`redis.conf` + a `loadmodule` line and
+`module.conf` block per module that built), so that's the file to load. The
+packaged `redis.conf` is the plain Redis-core config — use it to run without any
+module. To fold the module config into `redis.conf` instead, run
+`bash scripts/apply-redis-conf.sh` (see §6.1).
 
 No network access needed at build time — modules are already on disk.
 
@@ -558,8 +561,8 @@ make modules-update [<name> ...]             # idempotent: clones if missing, el
 make modules-shallow <name> [<name> ...]     # re-clone module(s) shallow (--depth 1) to reclaim disk
 make sync-redis-conf [<name> ...] \          # rewrite redis-full.conf from redis.conf + module.confs
     [MODULES="<names>"] [ASSUME_BUILT=1]
-# (baking modules into redis.conf is not a make target — it happens inside
-#  `make tarball` at packaging time; see §6.1)
+# (baking modules into redis.conf is not a make target — run
+#  `bash scripts/apply-redis-conf.sh` by hand; see §6.1)
 
 make [<name> ...|all|.|redis|core|none] [VAR=value ...]
 make all|build [<name> ...|all|.|redis|core|none] [VAR=value ...]

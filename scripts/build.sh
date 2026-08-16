@@ -16,6 +16,11 @@
 # Redis we just built.
 # Failures are collected and reported at the end.
 #
+# After the module builds, redis-full.conf is regenerated (scripts/
+# sync-redis-conf.sh) from the modules that built successfully — this is the
+# only place the generated conf is produced; `make modules-update` no longer
+# touches it.
+#
 # This script backs the default `make` goal, so it must stay POSIX-sh
 # clean: Redis builds on systems whose only shell is busybox ash or dash
 # (e.g. the alpine:latest Daily CI containers install no bash).
@@ -53,6 +58,7 @@ case "${INSTALL_RUST_TOOLCHAIN:-}" in
 esac
 
 failed=""
+built=""
 if [ -z "$modules" ]; then
   echo
   if [ -z "$cloned" ]; then
@@ -72,6 +78,8 @@ else
         REDIS_SERVER="$REPO_ROOT/src/redis-server"; then
       failed="$failed $name"
       echo "==> [module] $name: FAILED (continuing with remaining modules)"
+    else
+      built="$built $name"
     fi
   done
   if [ -n "$failed" ]; then
@@ -99,6 +107,17 @@ if [ -n "$modules" ]; then
     fi
   done
 fi
+
+# Regenerate redis-full.conf from what this build actually produced: only the
+# modules that built successfully are handed to sync-redis-conf, and sync itself
+# drops (comments out) any of them whose .so is absent — so the conf is a
+# truthful manifest of what redis-server can load. Deliberately no
+# ASSUME_BUILT: a module without a .so must not get an active loadmodule line.
+# "none" when nothing built, because an empty MODULES means "all" to sync.
+echo
+echo "==> Refreshing redis-full.conf via sync-redis-conf"
+"$MAKE_BIN" --no-print-directory sync-redis-conf MODULES="${built:-none}" \
+  || echo "==> WARNING: sync-redis-conf failed — redis-full.conf left as-is" >&2
 
 if [ -n "$failed" ]; then
   echo

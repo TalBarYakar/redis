@@ -37,9 +37,9 @@
 #                                      # the .so the upstream build produces).
 #                                      # Examples: `redisbloom.so`,
 #                                      # `search-community/redisearch.so`.
-#       loadmodule: <path-to-.so>      # used by `make modules-update` to
-#                                      # rewrite the auto-managed block in
-#                                      # redis.conf; the .so basename does not
+#       loadmodule: <path-to-.so>      # used by `make build` to rewrite the
+#                                      # auto-managed block in
+#                                      # redis-full.conf; the .so basename does not
 #                                      # always match the module name (e.g.
 #                                      # redisjson produces rejson.so).
 #       build_env: <KEY=VALUE ...>     # optional, space-separated. Exported

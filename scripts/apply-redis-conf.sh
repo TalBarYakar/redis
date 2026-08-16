@@ -2,9 +2,11 @@
 # apply-redis-conf.sh — regenerate redis-full.conf and overwrite redis.conf
 # with it, so `./src/redis-server redis.conf` auto-loads the bundled modules.
 #
-# Used by the tarball build (scripts/tarball.sh) so a release tarball ships a
-# single redis.conf that already contains all module configuration. Not part
-# of the normal local flow — for local runs just use `redis-server redis-full.conf`.
+# Used by scripts/deploy.sh (`make deploy` / `make install`), which passes
+# PREFIX=<installed modules dir> so redis.conf ends up with installed
+# loadmodule paths. `make tarball` does NOT run it — a release tarball ships
+# redis.conf untouched. Run it by hand if you want a single redis.conf carrying
+# all module configuration; otherwise just use `redis-server redis-full.conf`.
 #
 # Usage:
 #   scripts/apply-redis-conf.sh                       # apply

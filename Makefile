@@ -11,7 +11,7 @@ export MAKE
 
 .DEFAULT_GOAL := build
 
-# Used only by .DEFAULT:/install: below, for goals with no explicit rule in
+# Used only by .DEFAULT: below, for goals with no explicit rule in
 # this Makefile (e.g. `make distclean`, `make 32bit`) — those still recurse
 # into src/ only, matching upstream Redis. Modules are never part of this;
 # `make` / `make build` route through scripts/build.sh instead,
@@ -42,6 +42,7 @@ GOALS_WITH_ARGS := \
     clean:CLEAN_ARGS \
     bootstrap:BOOTSTRAP_ARGS \
     deploy:DEPLOY_ARGS \
+    install:DEPLOY_ARGS \
     test:TEST_ARGS \
     sync-redis-conf:SYNC_ARGS
 
@@ -88,8 +89,8 @@ endif
 .DEFAULT:
 	for dir in $(SUBDIRS); do $(MAKE) -C $$dir $@; done
 
-install:
-	for dir in $(SUBDIRS); do $(MAKE) -C $$dir $@; done
+# `install` is an alias for `deploy` — same args, same PREFIX/DESTDIR.
+install: deploy
 
 # clean [<name> ...|all|.|redis|none] — Redis core + selected modules.
 # Same per-module dispatch as scripts/build.sh. Env vars set on the make
@@ -113,11 +114,11 @@ bootstrap:
 	+@scripts/bootstrap.sh $(BOOTSTRAP_ARGS)
 
 # deploy [<name> ...|all|.|redis|none] [PREFIX=<path>] [DESTDIR=<path>]
-#   Install Redis core + selected modules (default: every cloned module),
-#   then rewrite the `loadmodule` paths in redis-full.conf (and redis.conf, if
-#   it carries a Modules block) to point at the installed .so paths under
-#   $(PREFIX)/lib/redis/modules. PREFIX defaults to /usr/local (same as
-#   `make install`). Done directly by scripts/deploy.sh — no apply step.
+#   Install Redis core + selected modules (default: every cloned module), then
+#   regenerate redis-full.conf with `loadmodule` paths under
+#   $(PREFIX)/lib/redis/modules and promote it onto redis.conf (via
+#   scripts/apply-redis-conf.sh), so the installed redis-server can be started
+#   with the plain redis.conf. PREFIX defaults to /usr/local.
 deploy: PREFIX ?= /usr/local
 deploy:
 	@PREFIX='$(PREFIX)' DESTDIR='$(DESTDIR)' scripts/deploy.sh $(DEPLOY_ARGS)
