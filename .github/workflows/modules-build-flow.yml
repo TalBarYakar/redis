@@ -18,19 +18,24 @@ name: Modules Build Flow
 # that OS and this workflow exists to catch exactly that.
 
 on:
-  # Only when the module pin manifest changes — a bump to any module's ref is
-  # exactly what can break the from-source build/load on some OS — or manually.
+  # Run when the module build flow, module pins, or build scripts change — all
+  # of those can break the from-source build/load on some OS — or manually.
   pull_request:
     paths:
+      - '.github/workflows/modules-build-flow.yml'
+      - 'Makefile'
+      - 'scripts/**'
+      - 'src/**'
+      - 'modules/**'
       - 'modules/modules.yaml'
   workflow_dispatch:
     inputs:
       use_repo:
         description: 'repo owner and name'
-        default: 'redis/redis'
+        default: ''
       use_git_ref:
         description: 'git branch or sha to use'
-        default: 'unstable'
+        default: ''
 
 jobs:
 
@@ -49,6 +54,10 @@ jobs:
       env:
         PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
     env:
+      # Paths shared by the package/deploy/uninstall smoke steps below.
+      EXTRACTED: /tmp/redis-tarball-check/redis-HEAD
+      DEPLOY_PREFIX: /tmp/redis-deploy
+      DEPLOY_RUN_LOG: /tmp/redis-deploy-run.log
       # GCC 12 (bookworm) has false positives inside its own avx512fintrin.h
       # (_mm256_undefined_pd self-init, GCC PR105593, fixed in GCC 13) which
       # VectorSimilarity's unconditional -Werror turns fatal on x86_64. The
@@ -142,8 +151,8 @@ jobs:
           git remote add origin "https://github.com/${{ github.repository }}.git"
           git fetch --depth 1 origin "+refs/pull/${{ github.event.pull_request.number }}/merge"
         else
-          git remote add origin "https://github.com/${{ github.event.inputs.use_repo || 'redis/redis' }}.git"
-          git fetch --depth 1 origin "${{ github.event.inputs.use_git_ref || 'unstable' }}"
+          git remote add origin "https://github.com/${{ github.event.inputs.use_repo || github.repository }}.git"
+          git fetch --depth 1 origin "${{ github.event.inputs.use_git_ref || github.sha }}"
         fi
         git checkout FETCH_HEAD
     - name: make modules-update
@@ -171,3 +180,60 @@ jobs:
           grep -qx "$m" module-list.txt || { echo "MISSING MODULE: $m"; exit 1; }
         done
         ./src/redis-cli shutdown nosave || true
+
+    # Package/deploy smoke: the tarball a consumer actually gets, deployed to
+    # a prefix and started from the installed paths. This is the only coverage
+    # for scripts/deploy.sh + scripts/uninstall.sh, so keep it in one OS row.
+    - name: make tarball
+      run: |
+        make tarball TAG=HEAD
+        rm -rf /tmp/redis-tarball-check && mkdir -p /tmp/redis-tarball-check
+        tar -xf /tmp/redis-HEAD.tar.gz -C /tmp/redis-tarball-check
+    - name: check tarball redis.conf loadmodule lines
+      run: |
+        for line in \
+          "loadmodule ./modules/redisbloom/redisbloom.so" \
+          "loadmodule ./modules/redisearch/redisearch.so" \
+          "loadmodule ./modules/redisjson/rejson.so" \
+          "loadmodule ./modules/redistimeseries/redistimeseries.so"; do
+          grep -qxF "$line" "$EXTRACTED/redis.conf" || { echo "ERROR: missing tarball redis.conf line: $line" >&2; exit 1; }
+        done
+    - name: make deploy from tarball
+      run: |
+        mkdir -p "$DEPLOY_PREFIX"
+        ( cd "$EXTRACTED" && make deploy PREFIX="$DEPLOY_PREFIX" )
+        for so in redisbloom.so redisearch.so rejson.so redistimeseries.so; do
+          line="loadmodule $DEPLOY_PREFIX/lib/redis/modules/$so"
+          grep -qxF "$line" "$EXTRACTED/redis.conf" || { echo "ERROR: deployed redis.conf missing absolute line: $line" >&2; exit 1; }
+        done
+        cp "$EXTRACTED/redis.conf" "$DEPLOY_PREFIX/redis.conf"
+    - name: run deployed server, verify modules
+      run: |
+        "$DEPLOY_PREFIX/bin/redis-server" "$DEPLOY_PREFIX/redis.conf" --appendonly no >"$DEPLOY_RUN_LOG" 2>&1 &
+        cli="$DEPLOY_PREFIX/bin/redis-cli"
+        i=0
+        until "$cli" PING 2>/dev/null | grep -q PONG; do
+          i=$((i+1)); [ "$i" -gt 120 ] && { tail -80 "$DEPLOY_RUN_LOG"; echo 'deployed redis-server did not become ready' >&2; exit 1; }
+          sleep 1
+        done
+        for needle in timeseries bf ReJSON search; do
+          "$cli" MODULE LIST | grep -qi "$needle" || { "$cli" MODULE LIST; echo "ERROR: module '$needle' was not loaded" >&2; exit 1; }
+        done
+        "$cli" TS.CREATE ts
+        "$cli" TS.ADD ts '*' 1
+        "$cli" BF.ADD bf x
+        "$cli" JSON.SET j '$' '{"a":1}'
+        "$cli" FT.CREATE idx ON HASH SCHEMA t TEXT
+        "$cli" SHUTDOWN NOSAVE || true
+    # `make install` must copy without rebuilding (SKIP_BUILD=1 default), and
+    # `make uninstall` must remove everything deploy/install put under PREFIX.
+    - name: make install (no rebuild) then make uninstall
+      run: |
+        rm -rf "$DEPLOY_PREFIX"
+        ( cd "$EXTRACTED" && make install PREFIX="$DEPLOY_PREFIX" )
+        for f in bin/redis-server bin/redis-cli lib/redis/modules/rejson.so; do
+          test -e "$DEPLOY_PREFIX/$f" || { echo "ERROR: install did not produce $f" >&2; exit 1; }
+        done
+        ( cd "$EXTRACTED" && make uninstall PREFIX="$DEPLOY_PREFIX" )
+        left="$(find "$DEPLOY_PREFIX/bin" "$DEPLOY_PREFIX/lib" -name 'redis*' 2>/dev/null || true)"
+        [ -z "$left" ] || { echo "ERROR: uninstall left files behind:"; echo "$left"; exit 1; }
