@@ -3006,6 +3006,17 @@ void makeThreadKillable(void) {
     pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
 }
 
+/* printf-alike handed to monotonicInit(), so clock detection fallbacks end up
+ * in the server log instead of stderr. */
+static void monotonicLogCallback(const char *fmt, ...) {
+    char msg[160];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof(msg), fmt, ap);
+    va_end(ap);
+    serverLog(LL_NOTICE, "monotonic clock: %s", msg);
+}
+
 void initServer(void) {
     int j;
 
@@ -3089,7 +3100,7 @@ void initServer(void) {
     hashTemplatesInit();
     createSharedObjects();
     adjustOpenFilesLimit();
-    const char *clk_msg = monotonicInit();
+    const char *clk_msg = monotonicInit(monotonicLogCallback);
     serverLog(LL_NOTICE, "monotonic clock: %s", clk_msg);
     server.el = aeCreateEventLoop(server.maxclients+CONFIG_FDSET_INCR);
     if (server.el == NULL) {
@@ -3110,6 +3121,7 @@ void initServer(void) {
     for (j = 0; j < server.dbnum; j++) {
         server.db[j].keys = kvstoreCreate(&kvstoreExType, &dbDictType, slot_count_bits, flags);
         server.db[j].expires = kvstoreCreate(&kvstoreBaseType, &dbExpiresDictType, slot_count_bits, flags);
+        server.db[j].blessed_keys = blessedKvstoreCreate(slot_count_bits, flags);
         server.db[j].subexpires = estoreCreate(&subexpiresBucketsType, slot_count_bits);
         server.db[j].expires_cursor = 0;
         server.db[j].blocking_keys = dictCreate(&keylistDictType);
@@ -4424,8 +4436,21 @@ uint64_t getCommandFlags(client *c) {
     return cmd_flags;
 }
 
+/* Compute what can be derived from the command argv alone: the command itself,
+ * its keys and slot, and the read errors that can be detected this early.
+ *
+ * It may be called again on the same pending command if the argv changed
+ * (a module command filter may insert, replace or delete arguments), so it
+ * starts by dropping whatever a previous call derived from the old argv. */
 void preprocessCommand(client *c, pendingCommand *pcmd) {
+    pcmd->cmd = NULL;
     pcmd->slot = INVALID_CLUSTER_SLOT;
+    pcmd->read_error = 0;
+    pcmd->flags &= ~PENDING_CMD_KEYS_RESULT_VALID;
+    pcmd->flags |= PENDING_CMD_FLAG_PREPROCESSED;
+    getKeysFreeResult(&pcmd->keys_result);
+    pcmd->keys_result = (getKeysResult)GETKEYS_RESULT_INIT;
+
     if (pcmd->argc == 0)
         return;
 
@@ -4450,7 +4475,6 @@ void preprocessCommand(client *c, pendingCommand *pcmd) {
         return;
     }
 
-    pcmd->keys_result = (getKeysResult)GETKEYS_RESULT_INIT;
     int num_keys = extractKeysAndSlot(pcmd->cmd, pcmd->argv, pcmd->argc,
                                       &pcmd->keys_result, &pcmd->slot);
     if (num_keys < 0) {
@@ -4597,7 +4621,7 @@ int processCommand(client *c) {
     /* Check if the user can run this command according to the current
      * ACLs. */
     int acl_errpos;
-    int acl_retval = ACLCheckAllPerm(c,&acl_errpos);
+    int acl_retval = ACLCheckAllPerm(c,c->current_pending_cmd,&acl_errpos);
     if (acl_retval != ACL_OK) {
         addACLLogEntry(c,acl_retval,(c->flags & CLIENT_MULTI) ? ACL_LOG_CTX_MULTI : ACL_LOG_CTX_TOPLEVEL,acl_errpos,NULL,NULL);
         sds msg = getAclErrorMessage(acl_retval, c->user, c->cmd, c->argv[acl_errpos]->ptr, 0);
@@ -4616,8 +4640,9 @@ int processCommand(client *c) {
           c->cmd->proc != execCommand))
     {
         int error_code;
+        getKeysResult *keyresult = getClientCachedKeyResult(c->current_pending_cmd);
         clusterNode *n = getNodeByQuery(c,c->cmd,c->argv,c->argc,
-            &c->slot,getClientCachedKeyResult(c),c->read_error,cmd_flags,&error_code);
+            &c->slot,keyresult,c->read_error,cmd_flags,&error_code);
         if (n == NULL || !clusterNodeIsMyself(n)) {
             if (c->cmd->proc == execCommand) {
                 discardTransaction(c);
@@ -6790,6 +6815,7 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
             "expired_time_cap_reached_count:%lld\r\n", server.stat_expired_time_cap_reached_count,
             "expire_cycle_cpu_milliseconds:%lld\r\n", server.stat_expire_cycle_time_used/1000,
             "evicted_keys:%lld\r\n", server.stat_evictedkeys,
+            "blessed_keys:%llu\r\n", blessedKeysCount(),
             "evicted_clients:%lld\r\n", server.stat_evictedclients,
             "evicted_scripts:%lld\r\n", server.stat_evictedscripts,
             "total_eviction_exceeded_time:%lld\r\n", (server.stat_total_eviction_exceeded_time + current_eviction_exceeded_time) / 1000,
@@ -8068,7 +8094,7 @@ int main(int argc, char **argv) {
     char config_from_stdin = 0;
 
 #ifdef REDIS_TEST
-    monotonicInit(); /* Required for dict tests, that are relying on monotime during dict rehashing. */
+    monotonicInit(NULL); /* Required for dict tests, that are relying on monotime during dict rehashing. */
     if (argc >= 3 && !strcasecmp(argv[1], "test")) {
         int flags = 0;
         for (j = 3; j < argc; j++) {
@@ -8152,6 +8178,8 @@ int main(int argc, char **argv) {
     moduleInitModulesSystem();
     connTypeInitialize();
     keyMetaInit();
+    keyAttrInit();
+    blessInit();
 
     /* Store the executable path and arguments in a safe place in order
      * to be able to restart the server later. */

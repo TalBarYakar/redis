@@ -119,6 +119,8 @@ void createDumpPayload(rio *payload, robj *o, robj *key, int dbid, int flags, si
      * metadata separately through keyMetaOnAof(). */
     if (!(flags & DUMP_PAYLOAD_SKIP_KEY_META) && getModuleMetaBits(o->metabits))
         serverAssert(rdbSaveKeyMetadata(payload, key, o, dbid) != -1);
+    /* Per-key attributes (bless) are NOT in the payload: DUMP/RESTORE drop them
+     * (a local decision), and ASM carries them as a follow-up command like TTL. */
     serverAssert(rdbSaveObjectType(payload,o));
     serverAssert(rdbSaveObject(payload,o,key,dbid));
 
@@ -309,6 +311,12 @@ void restoreCommand(client *c) {
     kvobj *oldval = lookupKeyWriteWithLink(c->db, key, &link);
     int oldtype = oldval ? oldval->type : -1;
 
+    /* RESTORE REPLACE recreates the key (dbDelete below), which would drop the
+     * destination's blessing. Product wants it kept when the payload carries none;
+     * capture it now and re-inject into the spec before dbAddInternal (a payload
+     * that is itself blessed wins). */
+    uint64_t oldAttr = (replace && oldval) ? keyAttrGet(oldval) : 0;
+
     /* Call dbDelete() only when a key is actually present:
      *   oldval != NULL -> key exists.
      *   link  == NULL  -> an expired key might still be physically present and 
@@ -337,6 +345,14 @@ void restoreCommand(client *c) {
 
     /* Create the key and set the TTL if any */
     kvobj *kv = dbAddInternal(c->db, key, &obj, &link, &keymeta);
+
+    /* Preserve the replaced key's blessing if the payload didn't bring one. Done
+     * after the add (not via the spec) so keyMetaSetMetadata handles reallocation
+     * and metadata ordering; a payload that is itself blessed wins. */
+    if (oldAttr && !(kv->metabits & KEY_ATTR_METABIT)) {
+        kv = keyMetaSetMetadata(c->db, kv, server.key_attr_class_id, oldAttr);
+        keyAttrTrackKey(c->db, key->ptr, oldAttr);
+    }
 
     /* Save type: kv may be reallocated by module callbacks during notifyKeyspaceEvent below. */
     int kvtype = kv->type;
@@ -2237,10 +2253,7 @@ void sflushCommand(client *c) {
     /* If client is AOF or master, we must obey the slot ranges. */
     int must_obey = mustObeyClient(c);
 
-    /* Iterate and find the slot ranges that belong to this node. Save them in
-     * a new slotRangeArray. It is allocated on heap since there is a chance
-     * that FLUSH SYNC will be running as blocking ASYNC and only later reply
-     * with slot ranges */
+    /* Iterate and find the slot ranges that belong to this node. */
     slotRangeArray *myslots = NULL;
     for (int i = 0; i < slots->num_ranges; i++) {
         for (int j = slots->ranges[i].start; j <= slots->ranges[i].end; j++) {
@@ -2257,9 +2270,6 @@ void sflushCommand(client *c) {
         return;
     }
     slotRangeArrayFree(slots);
-    
-    /* takes ownership of myslots */
-    asmTrimCtx *trim_ctx = asmTrimCtxCreate(myslots, server.db[0].keys);
 
     /* If the selected slots are exactly the same as the local slots, we can
      * simply flush the entire DB by flushCommandCommon. */
@@ -2268,10 +2278,9 @@ void sflushCommand(client *c) {
     slotRangeArrayFree(local_slots);
     if (all_slots_covered) {
         /* If not flush as blocking async, then reply immediately */
-        if (flushCommandCommon(c, FLUSH_TYPE_SLOTS, flags, trim_ctx) == 0) {
-            replySlotsFlush(c, trim_ctx->slots);
-        }
-        asmTrimCtxRelease(trim_ctx);
+        if (flushCommandCommon(c, FLUSH_TYPE_SLOTS, flags, myslots) == 0)
+            replySlotsFlush(c, myslots);
+        slotRangeArrayFree(myslots);
         return;
     }
 
@@ -2290,8 +2299,9 @@ void sflushCommand(client *c) {
     if (flags & EMPTYDB_ASYNC && server.loading == 0) {
         /* Update dirty stats before trimming. */
         server.dirty += getKeyCountInSlotRangeArray(myslots);
-        /* Pass client id for active trim to unblock client when trim completes. */
-        trim_method = asmTrimSlots(trim_ctx, blocking_async ? c->id : CLIENT_ID_NONE, 0);
+        /* Pass the client ID so either trim method can unblock the client when
+         * the trim completes. */
+        trim_method = asmTrimSlots(myslots, blocking_async ? c->id : CLIENT_ID_NONE, 0);
     } else {
         clusterDelKeysInSlotRangeArray(myslots, 1);
     }
@@ -2300,21 +2310,18 @@ void sflushCommand(client *c) {
      * SFLUSH will not be replicated nor put into the AOF. */
     forceCommandPropagation(c, PROPAGATE_REPL | PROPAGATE_AOF);
 
-    /* Handle waiting for trim job to complete in case of blocking async flush.
-     * Block the client and schedule completion callback based on trim method:
-     * - BG trim uses BIO lazyfree worker to trim the slots, so schedule a new
-     *   BIO lazyfree worker to wait for completion, then unblock client and reply.
-     * - Active trim works in cron job of the main thread, it will automatically
-     *   unblock client and reply in active trim completion. */
+    /* If a trim job was scheduled for a blocking async flush, block the client
+     * now. The job has recorded the client ID and will unblock and reply when
+     * finalized. */
     if (blocking_async && trim_method != ASM_TRIM_METHOD_NONE) {
         blockClientForAsyncFlush(c);
     } else {
         /* Reply with slot ranges that were flushed. SYNC and ASYNC mode will be
          * replied here immediately. */
-        replySlotsFlush(c, trim_ctx->slots);
+        replySlotsFlush(c, myslots);
     }
 
-    asmTrimCtxRelease(trim_ctx); /* if bg trim, released later by kvsAsyncFreeDoneCB() */
+    slotRangeArrayFree(myslots);
 }
 
 /* The READWRITE command just clears the READONLY command state. */

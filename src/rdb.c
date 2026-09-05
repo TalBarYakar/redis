@@ -1722,6 +1722,9 @@ int rdbSaveKeyValuePair(rio *rdb, robj *key, robj *val, long long expiretime, in
             return -1;
     }
 
+    /* Per-key attributes (bless): one opcode per attribute, just before TYPE. */
+    if (keyAttrRdbSave(rdb, val) == -1) return -1;
+
     /* Save type, key, value */
     if (rdbSaveObjectType(rdb,val) == -1) return -1;
     if (rdbSaveStringObject(rdb,key) == -1) return -1;
@@ -2354,14 +2357,29 @@ int rdbResolveKeyType(rio *rdb, int *type, int dbid, KeyMetaSpec *keymeta) {
         if (rdbLoadKeyMetadata(rdb, dbid, numClasses, keymeta) == -1) {
             return -1;
         }
-        /* Read the actual object type after metadata */
-        *type = rdbLoadObjectType(rdb);
-        if (*type == -1) {
+        /* Read the next opcode / type after metadata */
+        if ((*type = rdbLoadType(rdb)) == -1) {
             keyMetaSpecCleanup(keymeta);
             return -1;
         }
-    } else if (!rdbIsObjectType(*type)) {
+    }
+
+    /* Per-key attributes (bless): a run of payload-less opcodes, one per
+     * attribute, sitting right before the object type. */
+    uint64_t attrmask = 0, bit;
+    while ((bit = keyAttrBitForOpcode(*type)) != 0) {
+        attrmask |= bit;
+        if ((*type = rdbLoadType(rdb)) == -1) {
+            keyMetaSpecCleanup(keymeta);
+            return -1;
+        }
+    }
+    if (attrmask)
+        keyMetaSpecAddUnordered(keymeta, server.key_attr_class_id, attrmask);
+
+    if (!rdbIsObjectType(*type)) {
         /* Not metadata and not a valid object type */
+        keyMetaSpecCleanup(keymeta);
         return -1;
     }
 
@@ -4774,6 +4792,16 @@ static int rdbLoadRioWithLoadingCtxInternal(rio *rdb, int rdbflags, rdbSaveInfo 
                 goto eoferr;
             if (!server.cluster_enabled) {
                 continue; /* Ignore gracefully. */
+            }
+            /* slot_id comes straight from the RDB and is used as an index into the
+             * per-slot kvstore dictionaries. A malformed RDB can supply a value
+             * outside the valid slot range, which would be truncated to a negative or
+             * out-of-range int index inside the kvstore layer and cause an
+             * out-of-bounds access. Reject such records as corrupt before expanding. */
+            if (slot_id >= (uint64_t)kvstoreNumDicts(db->keys)) {
+                rdbReportCorruptRDB("SLOT_INFO slot id %llu is out of range (max %d)",
+                    (unsigned long long)slot_id, kvstoreNumDicts(db->keys));
+                return C_ERR;
             }
             /* In cluster mode we resize individual slot specific dictionaries based on the number of keys that slot holds. */
             kvstoreDictExpand(db->keys, slot_id, slot_size);
