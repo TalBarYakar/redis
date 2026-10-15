@@ -8220,6 +8220,7 @@ int iAmMaster(void) {
 #ifdef REDIS_TEST
 #include "testhelp.h"
 #include "intset.h"  /* Compact integer set structure */
+#include "murmurhash.h"
 
 int __failed_tests = 0;
 int __test_num = 0;
@@ -8245,6 +8246,7 @@ struct redisTest {
     {"util", utilTest},
     {"endianconv", endianconvTest},
     {"crc64", crc64Test},
+    {"murmurhash", murmurhashTest},
     {"zmalloc", zmalloc_test},
     {"sds", sdsTest},
     {"mstr", mstrTest},
